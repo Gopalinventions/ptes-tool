@@ -103,7 +103,15 @@ def add_network(fmap, buildings, pipes, theme_name="Standard network"):
 def marker(fmap, name, lat, lon, result=None):
     text = f"<b>{name}</b><br>Latitude: {lat:.6f}<br>Longitude: {lon:.6f}"
     if result:
-        text += f"<br>Score: {result['Score [%]']:.1f}%<br>Status: {result['Status']}<br>Connection: {result['Connection [m]']:.1f} m<br>DN: {result['DN']}"
+        branch_dn = result.get("Branch DN", result.get("DN", "Not available"))
+        main_dn = result.get("Main DN", "Not available")
+        text += (
+            f"<br>Score: {result['Score [%]']:.1f}%"
+            f"<br>Status: {result['Status']}"
+            f"<br>Connection: {result['Connection [m]']:.1f} m"
+            f"<br>Main pipe DN: {main_dn}"
+            f"<br>PTES branch DN: {branch_dn}"
+        )
     folium.Marker([lat, lon], tooltip=name, popup=folium.Popup(text, max_width=320),
                   icon=folium.Icon(color=COLORS[name], icon="info-sign")).add_to(fmap)
 
