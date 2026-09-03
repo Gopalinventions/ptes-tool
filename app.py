@@ -14,6 +14,11 @@ from calculations import (assess_main_pipe, darcy_weisbach_pressure_loss,
                           size_connection_pipe, size_storage_from_demand,
                           suitability_score, truncated_pit_geometry)
 from gis_analysis import clean_geometry, local_metric_crs, nearby_demand, nearest_pipe_connection, split_layers
+from spatial_analysis import (containing_parcel_measurements,
+                              intersecting_feature_count,
+                              nearest_distance_m,
+                              nearest_point_attribute,
+                              overlap_area_m2, read_uploaded_vector)
 
 st.set_page_config(page_title="PTES Comparison Tool", page_icon="♨️", layout="wide")
 st.title("PTES Location and Network Integration Tool")
@@ -112,6 +117,25 @@ def add_basemaps(fmap):
     ).add_to(fmap)
 
 
+def add_optional_layers(fmap, layers):
+    styles = {
+        "Candidate parcels": {"color": "#6B4F2A", "weight": 2, "fillOpacity": .05},
+        "Groundwater": {"color": "#00A6D6", "weight": 3, "fillColor": "#00A6D6", "fillOpacity": .25},
+        "Flood zones": {"color": "#0066CC", "weight": 2, "fillColor": "#4DA6FF", "fillOpacity": .30},
+        "Protected areas": {"color": "#167A3E", "weight": 2, "fillColor": "#4CAF50", "fillOpacity": .25},
+        "Roads": {"color": "#555555", "weight": 3},
+        "Known utilities": {"color": "#D81B60", "weight": 4, "dashArray": "6 4"},
+    }
+    for name, layer in layers.items():
+        if layer is None or layer.empty:
+            continue
+        wgs = json_safe(layer.to_crs(4326))
+        fields = [c for c in wgs.columns if c != "geometry"][:12]
+        popup = GeoJsonPopup(fields, fields, localize=True) if fields else None
+        folium.GeoJson(wgs, name=name, style_function=lambda _, s=styles[name]: s,
+                       highlight_function=lambda _: {"weight": 6}, popup=popup).add_to(fmap)
+
+
 def marker(fmap, name, lat, lon, result=None):
     text = f"<b>{name}</b><br>Latitude: {lat:.6f}<br>Longitude: {lon:.6f}"
     if result:
@@ -119,7 +143,7 @@ def marker(fmap, name, lat, lon, result=None):
         main_dn = result.get("Main DN", "Not available")
         text += (
             f"<br>Score: {result['Score [%]']:.1f}%"
-            f"<br>Status: {result['Status']}"
+            f"<br>Screening class: {result.get('Screening classification', 'Not assessed')}"
             f"<br>Connection: {result['Connection [m]']:.1f} m"
             f"<br>Main pipe DN: {main_dn}"
             f"<br>PTES branch DN: {branch_dn}"
@@ -130,6 +154,14 @@ def marker(fmap, name, lat, lon, result=None):
 
 with st.sidebar:
     uploaded = st.file_uploader("Upload nPro GeoJSON", type=["geojson", "json"])
+    with st.expander("Official GIS layers (optional)"):
+        st.caption("Upload authority-supplied GeoJSON layers. Missing layers are reported as not assessed.")
+        parcels_file = st.file_uploader("Candidate parcels", type=["geojson", "json"], key="parcels")
+        groundwater_file = st.file_uploader("Groundwater observations", type=["geojson", "json"], key="groundwater")
+        flood_file = st.file_uploader("Flood zones", type=["geojson", "json"], key="flood")
+        protected_file = st.file_uploader("Protected areas", type=["geojson", "json"], key="protected")
+        roads_file = st.file_uploader("Roads", type=["geojson", "json"], key="roads")
+        utilities_file = st.file_uploader("Known utilities", type=["geojson", "json"], key="utilities")
     st.header("PTES design")
     annual_demand = st.number_input("Annual system heat demand [MWh/year]", 1.0, value=20000.0)
     storage_type = st.selectbox("Storage type", ["Seasonal", "Weekly", "Daily"])
@@ -146,8 +178,10 @@ with st.sidebar:
         aspect_ratio = st.number_input("Length-to-width ratio", .2, value=1.0)
         rotation = st.number_input("Footprint rotation [degrees]", value=0.0)
         elevation_offset = st.number_input("Candidate elevation above nearest pipe [m]", value=0.0)
-    land_factor = st.number_input("Land allowance factor", 1.0, value=1.5)
-    available_land = st.number_input("Available land [m²]", 1.0, value=25000.0)
+        embankment_width = st.number_input("Embankment boundary offset [m]", 0.0, value=15.0)
+        construction_clearance = st.number_input("Construction working clearance [m]", 0.0, value=20.0)
+        land_factor = st.number_input("Fallback land allowance factor", 1.0, value=1.5)
+        available_land = st.number_input("Fallback available land [m²]", 1.0, value=25000.0)
     reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
 
 if uploaded is None:
@@ -165,6 +199,39 @@ try:
 except Exception as exc:
     st.error(f"Could not prepare GeoJSON: {exc}")
     st.stop()
+
+optional_files = {
+    "Candidate parcels": parcels_file,
+    "Groundwater": groundwater_file,
+    "Flood zones": flood_file,
+    "Protected areas": protected_file,
+    "Roads": roads_file,
+    "Known utilities": utilities_file,
+}
+optional_layers = {}
+for layer_name, layer_file in optional_files.items():
+    try:
+        optional_layers[layer_name] = read_uploaded_vector(layer_file, metric_crs)
+    except Exception as exc:
+        st.error(f"{layer_name} could not be loaded: {exc}")
+        optional_layers[layer_name] = None
+
+data_register = [{"Dataset": "Existing network and buildings", "Source file": uploaded.name,
+                  "Features": len(data), "Assessment status": "Loaded"}]
+for layer_name, layer_file in optional_files.items():
+    layer = optional_layers[layer_name]
+    data_register.append({"Dataset": layer_name,
+                          "Source file": layer_file.name if layer_file else "Not supplied",
+                          "Features": 0 if layer is None else len(layer),
+                          "Assessment status": "Not assessed" if layer is None else "Loaded"})
+
+groundwater_layer = optional_layers["Groundwater"]
+groundwater_fields = [] if groundwater_layer is None else [c for c in groundwater_layer.columns if c != "geometry"]
+groundwater_level_field = st.selectbox(
+    "Groundwater-level/elevation field",
+    ["Not supplied"] + groundwater_fields,
+    disabled=not groundwater_fields,
+)
 
 demand_options = [c for c in buildings_m.columns if c != "geometry"]
 preferred = next((c for c in ("b_heat_import_sum_MWh", "b_space_heat_sum_MWh") if c in demand_options), demand_options[0])
@@ -189,6 +256,7 @@ if c2.button("Clear all"):
 select_map = folium.Map(center, zoom_start=15, tiles=None)
 add_basemaps(select_map)
 add_network(select_map, buildings_wgs, pipes_wgs, map_theme)
+add_optional_layers(select_map, optional_layers)
 for name, xy in st.session_state.candidates.items():
     marker(select_map, name, xy["lat"], xy["lon"])
     if xy.get("route"):
@@ -234,6 +302,13 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
         rows, map_items = [], []
         for candidate in candidate_table.to_dict("records"):
             pt = gpd.GeoSeries([Point(candidate["Longitude"], candidate["Latitude"])], crs=4326).to_crs(metric_crs).iloc[0]
+            excavation = translate(rotate(box(-geometry["top_length_m"]/2, -geometry["top_width_m"]/2,
+                                                   geometry["top_length_m"]/2, geometry["top_width_m"]/2),
+                                           rotation, origin=(0, 0)), pt.x, pt.y)
+            embankment = excavation.buffer(embankment_width)
+            construction = embankment.buffer(construction_clearance)
+            parcel = containing_parcel_measurements(construction, optional_layers["Candidate parcels"])
+            assessed_land = parcel["parcel_area_m2"] or available_land
             saved = st.session_state.candidates[candidate["Candidate"]]
             if saved.get("route"):
                 route_wgs = gpd.GeoSeries([LineString(saved["route"])], crs=4326)
@@ -269,10 +344,30 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                 number("p_max_power_possible_kW"), number("p_power_reserve_abs_kW"),
                 power, operating_mode,
             )
-            score, status, _ = suitability_score(available_land / required_land, distance, demand500, pressure["pressure_risk"], reference_demand)
+            flood_overlap = overlap_area_m2(construction, optional_layers["Flood zones"])
+            protected_overlap = overlap_area_m2(construction, optional_layers["Protected areas"])
+            utility_crossings = intersecting_feature_count(connection.geometry.iloc[0], optional_layers["Known utilities"])
+            road_distance = nearest_distance_m(construction, optional_layers["Roads"])
+            groundwater = nearest_point_attribute(
+                pt, optional_layers["Groundwater"],
+                None if groundwater_level_field == "Not supplied" else groundwater_level_field,
+            )
+            score, status, _ = suitability_score(assessed_land / required_land, distance, demand500, pressure["pressure_risk"], reference_demand)
             row = {"Candidate": candidate["Candidate"], "Latitude": candidate["Latitude"], "Longitude": candidate["Longitude"],
-                   "Score [%]": score, "Status": status, "Connection [m]": distance, "Demand 500 m [MWh/year]": demand500,
+                   "Score [%]": score, "Screening classification": status,
+                   "Connection [m]": distance, "Demand 500 m [MWh/year]": demand500,
                    "Storage volume [m³]": storage["volume_m3"], "Energy/cycle [MWh]": storage["energy_per_cycle_mwh"],
+                   "Excavation boundary [m²]": excavation.area,
+                   "Embankment boundary [m²]": embankment.area,
+                   "Construction/access area [m²]": construction.area,
+                   "Assessed parcel area [m²]": parcel["parcel_area_m2"],
+                   "Construction outside parcel [m²]": parcel["footprint_outside_m2"],
+                   "Flood-zone overlap [m²]": flood_overlap,
+                   "Protected-area overlap [m²]": protected_overlap,
+                   "Utility crossings [count]": utility_crossings,
+                   "Nearest road [m]": road_distance,
+                   "Nearest groundwater observation [m]": groundwater["distance_m"],
+                   "Groundwater observed value": groundwater["value"],
                    "Top area [m²]": geometry["top_area_m2"], "Flow [m³/h]": flow["volume_flow_m3_h"],
                    "Main DN": main_check["main_dn"], "Branch DN": dn, "Velocity [m/s]": velocity,
                    "One-way pipe length [m]": distance, "Hydraulic circuit length [m]": 2 * distance,
@@ -282,12 +377,14 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                    "Return pressure at candidate [bar]": return_at_candidate,
                    "Main flow after scenario [m³/h]": main_check["new_flow_m3_h"],
                    "Capacity status": main_check["capacity_status"]}
-            footprint = translate(rotate(box(-geometry["top_length_m"]/2, -geometry["top_width_m"]/2,
-                                                 geometry["top_length_m"]/2, geometry["top_width_m"]/2),
-                                         rotation, origin=(0, 0)), pt.x, pt.y)
-            footprint_gdf = gpd.GeoDataFrame({"Candidate": [candidate["Candidate"]]}, geometry=[footprint], crs=metric_crs)
             rows.append(row)
-            map_items.append((row, connection.to_crs(4326), footprint_gdf.to_crs(4326)))
+            def boundary_layer(label, shape):
+                return gpd.GeoDataFrame({"Candidate": [candidate["Candidate"]], "Boundary": [label]},
+                                        geometry=[shape], crs=metric_crs).to_crs(4326)
+            map_items.append((row, connection.to_crs(4326),
+                              boundary_layer("Excavation", excavation),
+                              boundary_layer("Embankment", embankment),
+                              boundary_layer("Construction/access", construction)))
     except Exception as exc:
         st.error(f"Analysis failed: {exc}")
         st.stop()
@@ -300,21 +397,43 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     c.metric("Shortest connection", f"{ranking['Connection [m]'].min():.1f} m")
     st.dataframe(ranking.round(3), hide_index=True, use_container_width=True)
     st.bar_chart(ranking.set_index("Candidate")[["Score [%]"]])
+    st.subheader("GIS data provenance")
+    register = pd.DataFrame(data_register)
+    st.dataframe(register, hide_index=True, use_container_width=True)
 
     result_map = folium.Map(center, zoom_start=15, tiles=None)
     add_basemaps(result_map)
     add_network(result_map, buildings_wgs, pipes_wgs, map_theme)
-    for result, connection, footprint in map_items:
+    add_optional_layers(result_map, optional_layers)
+    for result, connection, excavation, embankment, construction in map_items:
         name, color = result["Candidate"], COLORS[result["Candidate"]]
+        folium.GeoJson(construction, name=f"{name} construction/access boundary",
+                       style_function=lambda _: {"color": "#555", "weight": 2, "dashArray": "7 5",
+                                                 "fillColor": "#999", "fillOpacity": .10}).add_to(result_map)
+        folium.GeoJson(embankment, name=f"{name} embankment boundary",
+                       style_function=lambda _: {"color": "#B7791F", "weight": 2,
+                                                 "fillColor": "#D69E2E", "fillOpacity": .15}).add_to(result_map)
         folium.GeoJson(connection, name=f"{name} connection", style_function=lambda _, col=color: {"color": col, "weight": 6},
                        tooltip=f"{name}: {result['Connection [m]']:.1f} m").add_to(result_map)
-        folium.GeoJson(footprint, name=f"{name} footprint", style_function=lambda _, col=color: {"color": col, "weight": 3, "fillColor": col, "fillOpacity": .38}).add_to(result_map)
+        folium.GeoJson(excavation, name=f"{name} excavation boundary", style_function=lambda _, col=color: {"color": col, "weight": 3, "fillColor": col, "fillOpacity": .38}).add_to(result_map)
         marker(result_map, name, result["Latitude"], result["Longitude"], result)
+    best = ranking.iloc[0]
+    loaded_optional = sum(layer is not None for layer in optional_layers.values())
+    summary_panel = f"""<div style='position:fixed;top:18px;right:18px;z-index:9999;background:white;
+    padding:12px;border:1px solid #555;max-width:285px;font-size:12px'>
+    <b>PTES engineering screening</b><br>Leading candidate: {best['Candidate']}<br>
+    Storage volume: {best['Storage volume [m³]']:.0f} m³<br>
+    Construction/access area: {best['Construction/access area [m²]']:.0f} m²<br>
+    Connection: {best['Connection [m]']:.1f} m · branch DN {best['Branch DN']}<br>
+    Optional authority layers loaded: {loaded_optional}/{len(optional_layers)}<br>
+    Missing layers remain not assessed.</div>"""
+    result_map.get_root().html.add_child(folium.Element(summary_panel))
     folium.LayerControl(collapsed=False).add_to(result_map)
     st.subheader("Combined interactive result map")
     st_folium(result_map, height=700, width=None, key="results", returned_objects=[])
     st.download_button("Download interactive HTML map", result_map.get_root().render().encode("utf-8"), "ptes_candidate_comparison_map.html", "text/html")
     st.download_button("Download comparison CSV", ranking.to_csv(index=False).encode("utf-8"), "ptes_candidate_comparison.csv", "text/csv")
+    st.download_button("Download GIS data register", register.to_csv(index=False).encode("utf-8"), "ptes_data_register.csv", "text/csv")
 
 st.divider()
 st.caption("Preliminary screening only. Validate topology, pumps, boundary pressures, pipe roughness, fittings and operating cases in nPro.")
