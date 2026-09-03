@@ -70,6 +70,47 @@ def json_safe(layer):
     return layer
 
 
+@st.cache_data(show_spinner="Reading and projecting GIS data…")
+def read_vector_bytes(file_bytes, target_crs=None, assume_wgs84=False):
+    """Cache expensive GeoJSON parsing across Streamlit widget reruns."""
+    layer = gpd.read_file(io.BytesIO(file_bytes))
+    if layer.crs is None:
+        if not assume_wgs84:
+            raise ValueError("The file has no CRS metadata.")
+        layer = layer.set_crs(4326)
+    layer = clean_geometry(layer)
+    return layer if target_crs is None else layer.to_crs(target_crs)
+
+
+def nearby_map_layers(layers, candidates, metric_crs, radius_m):
+    """Limit heavy contextual layers to the active candidate investigation area."""
+    if not candidates:
+        return {name: None for name in layers}
+    points = gpd.GeoSeries(
+        [Point(item["Longitude"], item["Latitude"]) for item in candidates], crs=4326
+    ).to_crs(metric_crs)
+    investigation_area = points.union_all().buffer(radius_m)
+    nearby = {}
+    for name, layer in layers.items():
+        nearby[name] = None if layer is None else layer[layer.geometry.intersects(investigation_area)].copy()
+    return nearby
+
+
+def excel_workbook(candidate_results, data_register):
+    """Create one engineering workbook with tabular results and provenance."""
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        candidate_results.to_excel(writer, sheet_name="Candidate results", index=False)
+        data_register.to_excel(writer, sheet_name="GIS data register", index=False)
+        for sheet in writer.book.worksheets:
+            sheet.freeze_panes = "A2"
+            sheet.auto_filter.ref = sheet.dimensions
+            for column in sheet.columns:
+                width = min(45, max(12, max(len(str(cell.value or "")) for cell in column) + 2))
+                sheet.column_dimensions[column[0].column_letter].width = width
+    return output.getvalue()
+
+
 def add_layer(fmap, layer, name, definitions, style, highlight):
     fields = [f for f in definitions if f in layer.columns]
     popup = GeoJsonPopup(fields, [definitions[f] for f in fields], localize=True) if fields else None
@@ -180,8 +221,8 @@ with st.sidebar:
         elevation_offset = st.number_input("Candidate elevation above nearest pipe [m]", value=0.0)
         embankment_width = st.number_input("Embankment boundary offset [m]", 0.0, value=15.0)
         construction_clearance = st.number_input("Construction working clearance [m]", 0.0, value=20.0)
-        land_factor = st.number_input("Fallback land allowance factor", 1.0, value=1.5)
-        available_land = st.number_input("Fallback available land [m²]", 1.0, value=25000.0)
+        parcel_radius = st.number_input("Nearby GIS investigation radius [m]", 100.0, value=1000.0,
+                                        help="Only nearby parcel and context features are drawn on the map.")
     reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
 
 if uploaded is None:
@@ -189,10 +230,7 @@ if uploaded is None:
     st.stop()
 
 try:
-    data = gpd.read_file(io.BytesIO(uploaded.getvalue()))
-    if data.crs is None:
-        data = data.set_crs(4326)
-        st.warning("No CRS was supplied; EPSG:4326 was assumed.")
+    data = read_vector_bytes(uploaded.getvalue(), assume_wgs84=True)
     buildings, pipes = split_layers(data)
     metric_crs = local_metric_crs(data)
     buildings_m, pipes_m = clean_geometry(buildings.to_crs(metric_crs)), clean_geometry(pipes.to_crs(metric_crs))
@@ -211,7 +249,9 @@ optional_files = {
 optional_layers = {}
 for layer_name, layer_file in optional_files.items():
     try:
-        optional_layers[layer_name] = read_uploaded_vector(layer_file, metric_crs)
+        optional_layers[layer_name] = None if layer_file is None else read_vector_bytes(
+            layer_file.getvalue(), target_crs=str(metric_crs)
+        )
     except Exception as exc:
         st.error(f"{layer_name} could not be loaded: {exc}")
         optional_layers[layer_name] = None
@@ -224,6 +264,11 @@ for layer_name, layer_file in optional_files.items():
                           "Source file": layer_file.name if layer_file else "Not supplied",
                           "Features": 0 if layer is None else len(layer),
                           "Assessment status": "Not assessed" if layer is None else "Loaded"})
+
+register = pd.DataFrame(data_register)
+with st.expander("GIS data register", expanded=True):
+    st.caption("This register records which measured datasets are available for the current investigation.")
+    st.dataframe(register, hide_index=True, use_container_width=True)
 
 groundwater_layer = optional_layers["Groundwater"]
 groundwater_fields = [] if groundwater_layer is None else [c for c in groundwater_layer.columns if c != "geometry"]
@@ -256,7 +301,12 @@ if c2.button("Clear all"):
 select_map = folium.Map(center, zoom_start=15, tiles=None)
 add_basemaps(select_map)
 add_network(select_map, buildings_wgs, pipes_wgs, map_theme)
-add_optional_layers(select_map, optional_layers)
+current_candidates = [
+    {"Candidate": name, "Latitude": item["lat"], "Longitude": item["lon"]}
+    for name, item in st.session_state.candidates.items()
+]
+map_context_layers = nearby_map_layers(optional_layers, current_candidates, metric_crs, parcel_radius)
+add_optional_layers(select_map, map_context_layers)
 for name, xy in st.session_state.candidates.items():
     marker(select_map, name, xy["lat"], xy["lon"])
     if xy.get("route"):
@@ -285,7 +335,7 @@ if drawings:
         if st.session_state.candidates[slot].get("route") != route:
             st.session_state.candidates[slot]["route"] = route
             st.rerun()
-st.caption("Click to place a storage. Use the polyline tool to draw a multi-bend route for the selected storage. Turn placement off to inspect popups.")
+st.caption("Click to place a storage. Nearby parcels and GIS layers appear only around placed candidates. Use the polyline tool to draw a multi-bend route.")
 
 candidate_table = pd.DataFrame([{"Candidate": n, "Latitude": v["lat"], "Longitude": v["lon"],
                                  "Manual route": bool(v.get("route"))} for n, v in st.session_state.candidates.items()])
@@ -298,7 +348,6 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
         geometry = truncated_pit_geometry(storage["volume_m3"], depth, side_slope, aspect_ratio)
         flow = required_flow(power, delta_t)
         _, dn, diameter, velocity = size_connection_pipe(flow["volume_flow_m3_s"])
-        required_land = geometry["top_area_m2"] * land_factor
         rows, map_items = [], []
         for candidate in candidate_table.to_dict("records"):
             pt = gpd.GeoSeries([Point(candidate["Longitude"], candidate["Latitude"])], crs=4326).to_crs(metric_crs).iloc[0]
@@ -308,7 +357,6 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
             embankment = excavation.buffer(embankment_width)
             construction = embankment.buffer(construction_clearance)
             parcel = containing_parcel_measurements(construction, optional_layers["Candidate parcels"])
-            assessed_land = parcel["parcel_area_m2"] or available_land
             saved = st.session_state.candidates[candidate["Candidate"]]
             if saved.get("route"):
                 route_wgs = gpd.GeoSeries([LineString(saved["route"])], crs=4326)
@@ -352,14 +400,18 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                 pt, optional_layers["Groundwater"],
                 None if groundwater_level_field == "Not supplied" else groundwater_level_field,
             )
-            score, status, _ = suitability_score(assessed_land / required_land, distance, demand500, pressure["pressure_risk"], reference_demand)
+            parcel_fit_ratio = 1.0 if parcel["parcel_area_m2"] is None else parcel["parcel_area_m2"] / construction.area
+            score, status, _ = suitability_score(parcel_fit_ratio, distance, demand500, pressure["pressure_risk"], reference_demand)
             row = {"Candidate": candidate["Candidate"], "Latitude": candidate["Latitude"], "Longitude": candidate["Longitude"],
                    "Score [%]": score, "Screening classification": status,
                    "Connection [m]": distance, "Demand 500 m [MWh/year]": demand500,
                    "Storage volume [m³]": storage["volume_m3"], "Energy/cycle [MWh]": storage["energy_per_cycle_mwh"],
-                   "Excavation boundary [m²]": excavation.area,
-                   "Embankment boundary [m²]": embankment.area,
-                   "Construction/access area [m²]": construction.area,
+                   "PTES excavation footprint [m²]": excavation.area,
+                   "Land take incl. embankment [m²]": embankment.area,
+                   "Total construction site needed [m²]": construction.area,
+                   "Construction/access allowance [m²]": construction.area - embankment.area,
+                   "Excavation top length [m]": geometry["top_length_m"],
+                   "Excavation top width [m]": geometry["top_width_m"],
                    "Assessed parcel area [m²]": parcel["parcel_area_m2"],
                    "Construction outside parcel [m²]": parcel["footprint_outside_m2"],
                    "Flood-zone overlap [m²]": flood_overlap,
@@ -397,14 +449,10 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     c.metric("Shortest connection", f"{ranking['Connection [m]'].min():.1f} m")
     st.dataframe(ranking.round(3), hide_index=True, use_container_width=True)
     st.bar_chart(ranking.set_index("Candidate")[["Score [%]"]])
-    st.subheader("GIS data provenance")
-    register = pd.DataFrame(data_register)
-    st.dataframe(register, hide_index=True, use_container_width=True)
-
     result_map = folium.Map(center, zoom_start=15, tiles=None)
     add_basemaps(result_map)
     add_network(result_map, buildings_wgs, pipes_wgs, map_theme)
-    add_optional_layers(result_map, optional_layers)
+    add_optional_layers(result_map, map_context_layers)
     for result, connection, excavation, embankment, construction in map_items:
         name, color = result["Candidate"], COLORS[result["Candidate"]]
         folium.GeoJson(construction, name=f"{name} construction/access boundary",
@@ -423,7 +471,9 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     padding:12px;border:1px solid #555;max-width:285px;font-size:12px'>
     <b>PTES engineering screening</b><br>Leading candidate: {best['Candidate']}<br>
     Storage volume: {best['Storage volume [m³]']:.0f} m³<br>
-    Construction/access area: {best['Construction/access area [m²]']:.0f} m²<br>
+    Excavation footprint: {best['PTES excavation footprint [m²]']:.0f} m²<br>
+    Land incl. embankment: {best['Land take incl. embankment [m²]']:.0f} m²<br>
+    Total construction site needed: {best['Total construction site needed [m²]']:.0f} m²<br>
     Connection: {best['Connection [m]']:.1f} m · branch DN {best['Branch DN']}<br>
     Optional authority layers loaded: {loaded_optional}/{len(optional_layers)}<br>
     Missing layers remain not assessed.</div>"""
@@ -434,6 +484,9 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     st.download_button("Download interactive HTML map", result_map.get_root().render().encode("utf-8"), "ptes_candidate_comparison_map.html", "text/html")
     st.download_button("Download comparison CSV", ranking.to_csv(index=False).encode("utf-8"), "ptes_candidate_comparison.csv", "text/csv")
     st.download_button("Download GIS data register", register.to_csv(index=False).encode("utf-8"), "ptes_data_register.csv", "text/csv")
+    st.download_button("Download complete engineering Excel workbook",
+                       excel_workbook(ranking, register), "ptes_engineering_results.xlsx",
+                       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.divider()
 st.caption("Preliminary screening only. Validate topology, pumps, boundary pressures, pipe roughness, fittings and operating cases in nPro.")
