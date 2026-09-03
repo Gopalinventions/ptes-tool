@@ -100,6 +100,18 @@ def add_network(fmap, buildings, pipes, theme_name="Standard network"):
                   {"color": "#1677FF", "weight": 4}, {"color": "#00B8D9", "weight": 7})
 
 
+def add_basemaps(fmap):
+    """Add street and satellite backgrounds to Streamlit and exported HTML maps."""
+    folium.TileLayer("OpenStreetMap", name="Street map", control=True).add_to(fmap)
+    folium.TileLayer(
+        tiles="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        attr="Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+        name="Satellite imagery",
+        overlay=False,
+        control=True,
+    ).add_to(fmap)
+
+
 def marker(fmap, name, lat, lon, result=None):
     text = f"<b>{name}</b><br>Latitude: {lat:.6f}<br>Longitude: {lon:.6f}"
     if result:
@@ -174,7 +186,8 @@ if c2.button("Clear all"):
     st.session_state.candidates = {}
     st.rerun()
 
-select_map = folium.Map(center, zoom_start=15)
+select_map = folium.Map(center, zoom_start=15, tiles=None)
+add_basemaps(select_map)
 add_network(select_map, buildings_wgs, pipes_wgs, map_theme)
 for name, xy in st.session_state.candidates.items():
     marker(select_map, name, xy["lat"], xy["lon"])
@@ -234,7 +247,9 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
             distance = float(connection["length_m"].iloc[0])
             demand = nearby_demand(pt, buildings_m, demand_col)
             demand500 = float(demand.loc[demand["Radius [m]"] == 500, "Annual demand [MWh]"].iloc[0])
-            pressure = darcy_weisbach_pressure_loss(distance, diameter, velocity)
+            # The route length is one-way. A closed PTES connection has parallel
+            # supply and return pipes, so the hydraulic circuit length is twice this value.
+            pressure = darcy_weisbach_pressure_loss(2 * distance, diameter, velocity)
             def number(field):
                 value = nearest.get(field)
                 try:
@@ -260,7 +275,8 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                    "Storage volume [m³]": storage["volume_m3"], "Energy/cycle [MWh]": storage["energy_per_cycle_mwh"],
                    "Top area [m²]": geometry["top_area_m2"], "Flow [m³/h]": flow["volume_flow_m3_h"],
                    "Main DN": main_check["main_dn"], "Branch DN": dn, "Velocity [m/s]": velocity,
-                   "Pressure loss [bar]": pressure["pressure_loss_bar"], "Pressure risk": pressure["pressure_risk"],
+                   "One-way pipe length [m]": distance, "Hydraulic circuit length [m]": 2 * distance,
+                   "Round-trip pressure loss [bar]": pressure["pressure_loss_bar"], "Pressure risk": pressure["pressure_risk"],
                    "Pipe elevation [m]": pipe_height, "Candidate elevation [m]": candidate_height,
                    "Supply pressure at candidate [bar]": supply_at_candidate,
                    "Return pressure at candidate [bar]": return_at_candidate,
@@ -285,7 +301,8 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     st.dataframe(ranking.round(3), hide_index=True, use_container_width=True)
     st.bar_chart(ranking.set_index("Candidate")[["Score [%]"]])
 
-    result_map = folium.Map(center, zoom_start=15)
+    result_map = folium.Map(center, zoom_start=15, tiles=None)
+    add_basemaps(result_map)
     add_network(result_map, buildings_wgs, pipes_wgs, map_theme)
     for result, connection, footprint in map_items:
         name, color = result["Candidate"], COLORS[result["Candidate"]]
