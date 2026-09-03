@@ -7,6 +7,7 @@ This Streamlit project converts the PTES notebook into a web application. It upl
 - `app.py`: Streamlit user interface
 - `calculations.py`: capacity, flow, DN, pressure-loss and scoring calculations
 - `gis_analysis.py`: GeoJSON, CRS, demand and nearest-pipe operations
+- `spatial_analysis.py`: parcel, constraint, road, utility and groundwater measurements
 - `requirements.txt`: Python packages
 - `.streamlit/config.toml`: colours and upload settings
 
@@ -34,10 +35,12 @@ streamlit run app.py
 
 1. Upload the nPro `.geojson` or `.json` file.
 2. Select the annual heat-demand column (MWh/year).
-3. Enter PTES design and land values in the sidebar.
-4. Click the proposed PTES location on the map.
-5. Click **Run PTES analysis**.
-6. Review and download the results.
+3. Optionally upload authoritative parcel, groundwater, flood, protected-area, road and utility GeoJSON layers.
+4. Enter PTES demand, operating and boundary-clearance inputs.
+5. Place up to three candidate locations and optionally draw multi-bend connection routes.
+6. Click **Analyse and compare**.
+7. Review the measured boundaries, hydraulic screening, constraint intersections and data register.
+8. Download the interactive HTML map, candidate CSV and GIS data register.
 
 ## Publish with Streamlit Community Cloud
 
@@ -50,4 +53,4 @@ Do not put confidential network data in a public repository. The application doe
 
 ## Engineering scope
 
-This is preliminary screening, not final design. Pipe dimensions are representative and the pressure-loss result uses assumed Darcy-Weisbach parameters. Validate inputs, materials, fittings and operating cases before design approval.
+This is preliminary engineering screening, not final design. Missing authority datasets are marked **Not assessed**; the app does not invent groundwater, flood, protected-area, road or utility values. Pipe dimensions are representative and the pressure-loss result uses assumed Darcy-Weisbach parameters. Validate survey elevations, groundwater time series, network topology, pumps, boundary pressures, pipe roughness, fittings, transient cases and permits before design approval.
