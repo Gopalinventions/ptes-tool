@@ -146,14 +146,23 @@ def required_flow(power_kw: float, delta_t_k: float) -> dict:
     }
 
 
-def size_connection_pipe(volume_flow_m3_s: float, min_velocity: float = 0.6, max_velocity: float = 2.0):
+def size_connection_pipe(volume_flow_m3_s: float, min_velocity: float = 0.6,
+                         max_velocity: float = 2.0, min_dn: int = 50,
+                         max_dn: int = 300):
+    """Screen a PTES branch within an explicitly permitted nominal-diameter range."""
+    if min_dn > max_dn:
+        raise ValueError("Minimum branch DN cannot exceed maximum branch DN.")
     rows = []
     for dn, diameter_m in DN_DIAMETERS_M.items():
+        if not min_dn <= dn <= max_dn:
+            continue
         area_m2 = math.pi * diameter_m**2 / 4
         velocity_m_s = volume_flow_m3_s / area_m2
         rows.append({"DN": dn, "inner_diameter_m": diameter_m, "velocity_m_s": velocity_m_s})
 
     table = pd.DataFrame(rows)
+    if table.empty:
+        raise ValueError("No standard pipe size exists inside the selected DN range.")
     valid = table[table["velocity_m_s"].between(min_velocity, max_velocity)]
     if not valid.empty:
         selected = valid.iloc[0]
