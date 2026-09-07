@@ -203,3 +203,51 @@ def suitability_score(land_ratio: float, connection_m: float, demand_500_mwh: fl
     score = float(criteria["Weighted score"].sum())
     status = "Good" if score >= 80 else "Moderate" if score >= 60 else "Weak"
     return score, status, criteria
+
+
+def engineering_suitability_score(*, hub_selected: bool, hub_distance_m: float | None,
+                                  land_ratio: float, connection_m: float,
+                                  demand_500_mwh: float, reference_demand_mwh: float,
+                                  pressure_risk: str, velocity_m_s: float,
+                                  capacity_status: str, flood_overlap_m2: float | None,
+                                  protected_overlap_m2: float | None,
+                                  utility_crossings: int | None,
+                                  loaded_optional_layers: int,
+                                  total_optional_layers: int) -> tuple[float, str, pd.DataFrame]:
+    """Seven-criterion PTES screening score with weights totalling 100 percent."""
+    if hub_selected and hub_distance_m is not None:
+        hub = 100 if hub_distance_m <= 100 else 85 if hub_distance_m <= 250 else 65 if hub_distance_m <= 500 else 40
+    else:
+        hub = 0
+    demand = min(100.0, demand_500_mwh / max(reference_demand_mwh, 1.0) * 100.0)
+    network = 100 if connection_m <= 100 else 85 if connection_m <= 250 else 65 if connection_m <= 500 else 40 if connection_m <= 1000 else 20
+    velocity_score = 100 if 0.6 <= velocity_m_s <= 2.0 else 55 if 0.3 <= velocity_m_s < 0.6 else 20
+    pressure_score = {"Low": 100, "Medium": 65, "High": 25}.get(pressure_risk, 40)
+    capacity_score = {"Preliminarily compatible": 100, "Detailed simulation required": 55,
+                      "Insufficient main-pipe capacity": 0}.get(capacity_status, 40)
+    hydraulics = (velocity_score + pressure_score + capacity_score) / 3.0
+    land = 100 if land_ratio >= 1.3 else 85 if land_ratio >= 1.1 else 65 if land_ratio >= 1.0 else 30 if land_ratio >= 0.8 else 0
+    gis = 100.0
+    if protected_overlap_m2 is not None and protected_overlap_m2 > 0:
+        gis -= 70
+    if flood_overlap_m2 is not None and flood_overlap_m2 > 0:
+        gis -= 35
+    if utility_crossings is not None:
+        gis -= min(30, utility_crossings * 10)
+    gis = max(0.0, gis)
+    confidence = 100.0 * loaded_optional_layers / max(total_optional_layers, 1)
+    criteria = pd.DataFrame({
+        "Criterion": ["Energy-hub suitability", "Demand and storage performance",
+                      "Network connection", "Hydraulic compatibility",
+                      "Land and construction fit", "GIS/environmental constraints",
+                      "Data confidence"],
+        "Weight [%]": [15, 15, 15, 20, 20, 10, 5],
+        "Criterion score [%]": [hub, demand, network, hydraulics, land, gis, confidence],
+    })
+    criteria["Weighted contribution [%]"] = criteria["Weight [%]"] * criteria["Criterion score [%]"] / 100.0
+    score = float(criteria["Weighted contribution [%]"].sum())
+    classification = ("Promising candidate" if score >= 80 else
+                      "Potentially suitable" if score >= 65 else
+                      "Constrained candidate" if score >= 50 else
+                      "Unfavourable at screening level")
+    return score, classification, criteria
