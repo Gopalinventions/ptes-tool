@@ -238,6 +238,17 @@ with st.sidebar:
     efficiency = st.slider("Efficiency", .5, 1.0, .8)
     power = st.number_input("Charge/discharge power [kW]", 1.0, value=3300.0)
     delta_t = st.number_input("Design ΔT [K]", 1.0, value=30.0)
+    branch_dn_options = [50, 65, 80, 100, 125, 150, 200, 250, 300]
+    minimum_branch_dn = st.selectbox(
+        "Minimum PTES branch DN", branch_dn_options,
+        index=branch_dn_options.index(150),
+        help="DN150 is the project screening floor. Final sizing must be checked hydraulically.",
+    )
+    maximum_branch_dn = st.selectbox(
+        "Maximum PTES branch DN", branch_dn_options,
+        index=branch_dn_options.index(250),
+        help="Increase only when the design flow cannot remain within the velocity limit.",
+    )
     operating_mode = st.selectbox("Operating mode", ["Charging", "Discharging", "Idle"])
     with st.expander("Weather-derived demand profile"):
         weather_source = st.selectbox("Weather-data source", ["Not supplied", "DWD TRY", "ERA5-Land", "Other hourly CSV"])
@@ -451,7 +462,19 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
             }
         geometry = truncated_pit_geometry(storage["volume_m3"], depth, side_slope, aspect_ratio)
         flow = required_flow(power, delta_t)
-        _, dn, diameter, velocity = size_connection_pipe(flow["volume_flow_m3_s"])
+        _, dn, diameter, velocity = size_connection_pipe(
+            flow["volume_flow_m3_s"], min_dn=minimum_branch_dn, max_dn=maximum_branch_dn
+        )
+        if velocity > 2.0:
+            st.warning(
+                f"Required flow exceeds the screening velocity limit in DN{dn} "
+                f"({velocity:.2f} m/s). Increase the maximum DN or revise power/ΔT."
+            )
+        elif velocity < 0.6:
+            st.info(
+                f"DN{dn} is enforced by the selected minimum, but its velocity is only "
+                f"{velocity:.2f} m/s. Review capital cost, heat loss and controllability."
+            )
         rows, map_items = [], []
         for candidate in candidate_table.to_dict("records"):
             pt = gpd.GeoSeries([Point(candidate["Longitude"], candidate["Latitude"])], crs=4326).to_crs(metric_crs).iloc[0]
@@ -526,6 +549,11 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                    "Groundwater observed value": groundwater["value"],
                    "Top area [m²]": geometry["top_area_m2"], "Flow [m³/h]": flow["volume_flow_m3_h"],
                    "Main DN": main_check["main_dn"], "Branch DN": dn, "Velocity [m/s]": velocity,
+                   "Branch sizing status": (
+                       "Within screening velocity range" if 0.6 <= velocity <= 2.0
+                       else "Velocity above screening limit" if velocity > 2.0
+                       else "Below screening velocity; minimum DN enforced"
+                   ),
                    "One-way pipe length [m]": distance, "Hydraulic circuit length [m]": 2 * distance,
                    "Round-trip pressure loss [bar]": pressure["pressure_loss_bar"], "Pressure risk": pressure["pressure_risk"],
                    "Pipe elevation [m]": pipe_height, "Candidate elevation [m]": candidate_height,
