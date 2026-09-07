@@ -8,6 +8,7 @@ This Streamlit project converts the PTES notebook into a web application. It upl
 - `calculations.py`: capacity, flow, DN, pressure-loss and scoring calculations
 - `gis_analysis.py`: GeoJSON, CRS, demand and nearest-pipe operations
 - `spatial_analysis.py`: parcel, constraint, road, utility and groundwater measurements
+- `weather_analysis.py`: DWD TRY, ERA5 and generic hourly weather-demand processing
 - `requirements.txt`: Python packages
 - `.streamlit/config.toml`: colours and upload settings
 
@@ -37,10 +38,15 @@ streamlit run app.py
 2. Select the annual heat-demand column (MWh/year).
 3. Optionally upload authoritative parcel, groundwater, flood, protected-area, road and utility GeoJSON layers.
 4. Enter PTES demand, operating and boundary-clearance inputs.
+   Optionally upload a DWD TRY, ERA5-Land or generic weather CSV/TXT to derive winter, summer and transition demand.
 5. Place up to three candidate locations and optionally draw multi-bend connection routes.
 6. Click **Analyse and compare**.
-7. Review the measured boundaries, hydraulic screening, constraint intersections and data register.
-8. Download the interactive HTML map, candidate CSV and GIS data register.
+7. Review the calculated excavation footprint, embankment land take, total construction-site area, hydraulic screening, constraint intersections and always-visible data register.
+8. Download the interactive HTML map, CSV files, or the complete Excel workbook.
+
+Weather-derived profiles are normalized to the entered annual heat demand. They are synthetic profiles, not measured network loads. The Excel workbook includes seasonal and monthly demand sheets whenever a weather file is supplied successfully.
+
+Large parcel and contextual layers are drawn only within the selected nearby-investigation radius around placed storage candidates. This keeps the interactive map responsive while retaining the full uploaded geometry for engineering intersection checks.
 
 ## Publish with Streamlit Community Cloud
 
