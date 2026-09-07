@@ -213,8 +213,14 @@ def engineering_suitability_score(*, hub_selected: bool, hub_distance_m: float |
                                   protected_overlap_m2: float | None,
                                   utility_crossings: int | None,
                                   loaded_optional_layers: int,
-                                  total_optional_layers: int) -> tuple[float, str, pd.DataFrame]:
-    """Seven-criterion PTES screening score with weights totalling 100 percent."""
+                                  total_optional_layers: int,
+                                  selected_criteria: list[str] | None = None) -> tuple[float, str, pd.DataFrame]:
+    """PTES screening score using only the engineer-selected criteria.
+
+    The established base weights are re-normalised to 100 percent after criteria
+    are selected.  This keeps scores comparable without silently treating an
+    omitted criterion as a zero score.
+    """
     if hub_selected and hub_distance_m is not None:
         hub = 100 if hub_distance_m <= 100 else 85 if hub_distance_m <= 250 else 65 if hub_distance_m <= 500 else 40
     else:
@@ -241,10 +247,18 @@ def engineering_suitability_score(*, hub_selected: bool, hub_distance_m: float |
                       "Network connection", "Hydraulic compatibility",
                       "Land and construction fit", "GIS/environmental constraints",
                       "Data confidence"],
-        "Weight [%]": [15, 15, 15, 20, 20, 10, 5],
+        "Base weight [%]": [15, 15, 15, 20, 20, 10, 5],
         "Criterion score [%]": [hub, demand, network, hydraulics, land, gis, confidence],
     })
-    criteria["Weighted contribution [%]"] = criteria["Weight [%]"] * criteria["Criterion score [%]"] / 100.0
+    if selected_criteria is not None:
+        criteria = criteria[criteria["Criterion"].isin(selected_criteria)].copy()
+    if criteria.empty:
+        raise ValueError("Select at least one suitability criterion.")
+    weight_total = float(criteria["Base weight [%]"].sum())
+    criteria["Applied weight [%]"] = criteria["Base weight [%]"] / weight_total * 100.0
+    criteria["Weighted contribution [%]"] = (
+        criteria["Applied weight [%]"] * criteria["Criterion score [%]"] / 100.0
+    )
     score = float(criteria["Weighted contribution [%]"].sum())
     classification = ("Promising candidate" if score >= 80 else
                       "Potentially suitable" if score >= 65 else

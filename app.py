@@ -57,6 +57,11 @@ PIPE_FIELDS = {
     "p_max_power_possible_kW": "Possible power [kW]",
 }
 COLORS = {"Storage A": "green", "Storage B": "orange", "Storage C": "purple"}
+SCORING_CRITERIA = [
+    "Energy-hub suitability", "Demand and storage performance", "Network connection",
+    "Hydraulic compatibility", "Land and construction fit",
+    "GIS/environmental constraints", "Data confidence",
+]
 THEMES = {
     "Standard network": None,
     "Supply pressure [bar]": "p_abs_pres_supply_sim_bar",
@@ -122,6 +127,12 @@ def excel_workbook(candidate_results, data_register, seasonal_results=None, mont
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         sheet_name = "Engineering Summary"
         row = 1
+        candidate_results = candidate_results.copy()
+        candidate_results["Candidate"] = pd.Categorical(
+            candidate_results["Candidate"], ["Storage A", "Storage B", "Storage C"], ordered=True
+        )
+        candidate_results = candidate_results.sort_values("Candidate").reset_index(drop=True)
+        candidate_results["Candidate"] = candidate_results["Candidate"].astype(str)
         excel_safe_frame(candidate_results).to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
         sheet = writer.sheets[sheet_name]
         sheet.cell(row=1, column=1, value="PTES candidate comparison")
@@ -137,8 +148,17 @@ def excel_workbook(candidate_results, data_register, seasonal_results=None, mont
             sheet.cell(row=row, column=1, value="Weather-derived monthly demand")
             excel_safe_frame(monthly_results).to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
         for sheet in writer.book.worksheets:
-            sheet.freeze_panes = "A2"
-            sheet.auto_filter.ref = sheet.dimensions
+            sheet.freeze_panes = "B3"
+            sheet.auto_filter.ref = f"A2:{sheet.cell(row=2, column=len(candidate_results.columns)).coordinate}"
+            sheet.sheet_view.showGridLines = False
+            sheet.row_dimensions[1].height = 25
+            sheet.row_dimensions[2].height = 42
+            for cell in sheet[1]:
+                cell.font = cell.font.copy(bold=True, size=14)
+            for cell in sheet[2]:
+                cell.font = cell.font.copy(bold=True, color="FFFFFF")
+                cell.fill = cell.fill.copy(fill_type="solid", fgColor="1F4E78")
+                cell.alignment = cell.alignment.copy(wrap_text=True, vertical="center")
             for column in sheet.columns:
                 width = min(45, max(12, max(len(str(cell.value or "")) for cell in column) + 2))
                 sheet.column_dimensions[column[0].column_letter].width = width
@@ -152,10 +172,60 @@ def add_layer(fmap, layer, name, definitions, style, highlight):
                    highlight_function=lambda _: highlight, popup=popup).add_to(fmap)
 
 
-def add_network(fmap, buildings, pipes, theme_name="Standard network"):
-    add_layer(fmap, buildings, "Buildings — click for details", BUILDING_FIELDS,
-              {"color": "#555", "weight": 1, "fillColor": "#F3A712", "fillOpacity": .28},
-              {"weight": 3, "fillOpacity": .5})
+def add_network(fmap, buildings, pipes, theme_name="Standard network",
+                building_demand_field=None, demand_classes=12):
+    """Draw network data and a 10–12 class annual building-demand legend."""
+    demand_palette = [
+        "#ffffcc", "#ffeda0", "#fed976", "#feb24c", "#fd8d3c", "#fc4e2a",
+        "#ef3b2c", "#e31a1c", "#bd0026", "#99000d", "#67000d", "#3f0010",
+    ]
+    if building_demand_field and building_demand_field in buildings.columns:
+        values = pd.to_numeric(buildings[building_demand_field], errors="coerce")
+        low, high = float(values.min()), float(values.max())
+        palette = [
+            demand_palette[round(i * (len(demand_palette) - 1) / max(demand_classes - 1, 1))]
+            for i in range(demand_classes)
+        ]
+
+        def building_style(feature):
+            try:
+                value = float(feature["properties"].get(building_demand_field))
+                fraction = 0.0 if high == low else (value - low) / (high - low)
+                index = min(demand_classes - 1, max(0, int(fraction * demand_classes)))
+                color = palette[index]
+            except (TypeError, ValueError):
+                color = "#B8B8B8"
+            return {"color": "#555", "weight": 1, "fillColor": color, "fillOpacity": .72}
+
+        building_fields = dict(BUILDING_FIELDS)
+        building_fields.setdefault(building_demand_field, "Annual heat demand [MWh/year]")
+        popup_fields = [field for field in building_fields if field in buildings.columns]
+        folium.GeoJson(
+            buildings, name="Buildings — annual heat demand", style_function=building_style,
+            highlight_function=lambda _: {"color": "#00FFFF", "weight": 3, "fillOpacity": .9},
+            popup=GeoJsonPopup(popup_fields, [building_fields[field] for field in popup_fields], localize=True),
+        ).add_to(fmap)
+        intervals = []
+        for index, color in enumerate(palette):
+            start = low + (high - low) * index / demand_classes
+            end = low + (high - low) * (index + 1) / demand_classes
+            intervals.append(
+                f"<div><span style='display:inline-block;width:13px;height:10px;background:{color};"
+                f"margin-right:5px'></span>{start:,.0f}–{end:,.0f}</div>"
+            )
+        building_legend = (
+            "<div style='position:fixed;bottom:24px;left:24px;z-index:9998;background:white;"
+            "padding:10px 12px;border:1px solid #777;border-radius:4px;font-size:11px;"
+            "max-height:310px;overflow:auto'><b>Building annual heat demand</b><br>"
+            "MWh/year<br>" + "".join(intervals) +
+            "<div><span style='display:inline-block;width:13px;height:10px;background:#B8B8B8;"
+            "margin-right:5px'></span>No value</div></div>"
+        )
+        fmap.get_root().html.add_child(folium.Element(building_legend))
+    else:
+        add_layer(fmap, buildings, "Buildings — click for details", BUILDING_FIELDS,
+                  {"color": "#555", "weight": 1, "fillColor": "#F3A712", "fillOpacity": .28},
+                  {"weight": 3, "fillOpacity": .5})
     field = THEMES.get(theme_name)
     if field and field in pipes.columns:
         values = pd.to_numeric(pipes[field], errors="coerce")
@@ -173,7 +243,7 @@ def add_network(fmap, buildings, pipes, theme_name="Standard network"):
         folium.GeoJson(pipes, name=theme_name, style_function=themed_style,
                        highlight_function=lambda _: {"color": "#00FFFF", "weight": 8},
                        popup=GeoJsonPopup(fields, [PIPE_FIELDS[f] for f in fields], localize=True)).add_to(fmap)
-        legend = f"<div style='position:fixed;bottom:35px;left:35px;z-index:9999;background:white;padding:10px;border:1px solid #777'><b>{theme_name}</b><br>Low&nbsp; <span style='color:#313695'>■</span> <span style='color:#74add1'>■</span> <span style='color:#ffffbf'>■</span> <span style='color:#f46d43'>■</span> <span style='color:#a50026'>■</span>&nbsp; High<br>{low:.2f} – {high:.2f}</div>"
+        legend = f"<div style='position:fixed;top:18px;left:55px;z-index:9999;background:white;padding:10px;border:1px solid #777'><b>{theme_name}</b><br>Low&nbsp; <span style='color:#313695'>■</span> <span style='color:#74add1'>■</span> <span style='color:#ffffbf'>■</span> <span style='color:#f46d43'>■</span> <span style='color:#a50026'>■</span>&nbsp; High<br>{low:.2f} – {high:.2f}</div>"
         fmap.get_root().html.add_child(folium.Element(legend))
     else:
         add_layer(fmap, pipes, "Pipes — click for details", PIPE_FIELDS,
@@ -285,6 +355,18 @@ with st.sidebar:
         construction_clearance = st.number_input("Construction working clearance [m]", 0.0, value=20.0)
         parcel_radius = st.number_input("Nearby GIS investigation radius [m]", 100.0, value=1000.0,
                                         help="Only nearby parcel and context features are drawn on the map.")
+    with st.expander("7 · Suitability percentage", expanded=True):
+        selected_scoring_criteria = st.multiselect(
+            "Criteria included in percentage",
+            SCORING_CRITERIA,
+            default=SCORING_CRITERIA,
+            help=("Choose 1–7 criteria. The established engineering weights of the selected "
+                  "criteria are automatically re-normalised to 100%."),
+        )
+        st.caption(
+            "Unselected criteria are excluded, not scored as zero. Selected base weights are "
+            "re-normalised so their applied weights total 100%."
+        )
 
 st.sidebar.markdown(
     """
@@ -404,6 +486,10 @@ groundwater_level_field = st.selectbox(
 demand_options = [c for c in buildings_m.columns if c != "geometry"]
 preferred = next((c for c in ("b_heat_import_sum_MWh", "b_space_heat_sum_MWh") if c in demand_options), demand_options[0])
 demand_col = st.selectbox("Annual heat-demand column", demand_options, index=demand_options.index(preferred))
+building_demand_classes = st.select_slider(
+    "Building heat-demand legend classes", options=[10, 11, 12], value=12,
+    help="The selected number of colour classes is included in the downloadable HTML map.",
+)
 buildings_m[demand_col] = pd.to_numeric(buildings_m[demand_col], errors="coerce").fillna(0)
 buildings_m = buildings_m.reset_index(drop=True)
 hub_name_field = next((c for c in ("b_building_name", "b_addr_street", "b_building_type")
@@ -445,7 +531,7 @@ if c2.button("Clear all"):
 
 select_map = folium.Map(center, zoom_start=15, tiles=None)
 add_basemaps(select_map)
-add_network(select_map, buildings_wgs, pipes_wgs, map_theme)
+add_network(select_map, buildings_wgs, pipes_wgs, map_theme, demand_col, building_demand_classes)
 energy_hub_marker(select_map, hub_geometry_wgs.y, hub_geometry_wgs.x, selected_hub_label.split(":", 1)[1].strip())
 current_candidates = [
     {"Candidate": name, "Latitude": item["lat"], "Longitude": item["lon"]}
@@ -504,6 +590,8 @@ if not candidate_table.empty:
 
 if st.button("Analyse and compare", type="primary", disabled=candidate_table.empty):
     try:
+        if not selected_scoring_criteria:
+            raise ValueError("Select at least one criterion for the suitability percentage.")
         if storage_volume_mode == "Calculate from demand":
             storage = size_storage_from_demand(annual_demand, coverage, storage_type, tmax, tmin, efficiency)
         else:
@@ -595,8 +683,10 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                 flood_overlap_m2=flood_overlap, protected_overlap_m2=protected_overlap,
                 utility_crossings=utility_crossings, loaded_optional_layers=loaded_optional,
                 total_optional_layers=len(optional_layers),
+                selected_criteria=selected_scoring_criteria,
             )
             criterion_scores = dict(zip(criteria["Criterion"], criteria["Criterion score [%]"]))
+            criterion_weights = dict(zip(criteria["Criterion"], criteria["Applied weight [%]"]))
             row = {"Candidate": candidate["Candidate"], "Latitude": candidate["Latitude"], "Longitude": candidate["Longitude"],
                    "Score [%]": score, "Screening classification": status,
                    "Energy hub": selected_hub_label.split(":", 1)[1].strip(),
@@ -631,7 +721,8 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                    "Return pressure at candidate [bar]": return_at_candidate,
                    "Main flow after scenario [m³/h]": main_check["new_flow_m3_h"],
                    "Capacity status": main_check["capacity_status"],
-                   **{f"Score — {name} [%]": value for name, value in criterion_scores.items()}}
+                   **{f"Score — {name} [%]": value for name, value in criterion_scores.items()},
+                   **{f"Applied weight — {name} [%]": value for name, value in criterion_weights.items()}}
             rows.append(row)
             def boundary_layer(label, shape):
                 return gpd.GeoDataFrame({"Candidate": [candidate["Candidate"]], "Boundary": [label]},
@@ -697,11 +788,15 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
             score_table = pd.DataFrame({
                 "Criterion": [column.removeprefix("Score — ").removesuffix(" [%]") for column in score_columns],
                 "Score [%]": [result[column] for column in score_columns],
+                "Applied weight [%]": [
+                    result[f"Applied weight — {column.removeprefix('Score — ').removesuffix(' [%]')} [%]"]
+                    for column in score_columns
+                ],
             })
             st.dataframe(score_table.round(1), hide_index=True, use_container_width=True)
     result_map = folium.Map(center, zoom_start=15, tiles=None)
     add_basemaps(result_map)
-    add_network(result_map, buildings_wgs, pipes_wgs, map_theme)
+    add_network(result_map, buildings_wgs, pipes_wgs, map_theme, demand_col, building_demand_classes)
     energy_hub_marker(result_map, hub_geometry_wgs.y, hub_geometry_wgs.x,
                       selected_hub_label.split(":", 1)[1].strip())
     add_optional_layers(result_map, map_context_layers)
@@ -723,22 +818,30 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
         folium.GeoJson(excavation, name=f"{name} excavation boundary", style_function=lambda _, col=color: {"color": col, "weight": 3, "fillColor": col, "fillOpacity": .38}).add_to(result_map)
         marker(result_map, name, result["Latitude"], result["Longitude"], result)
     best = ranking.iloc[0]
-    summary_panel = f"""<div style='position:fixed;top:18px;right:18px;z-index:9999;background:white;
-    padding:12px;border:1px solid #555;max-width:285px;font-size:12px'>
-    <b>PTES engineering screening</b><br>Leading candidate: {best['Candidate']}<br>
+    summary_panel = f"""<div style='position:fixed;bottom:24px;right:24px;z-index:9999;background:white;
+    padding:12px 14px;border:1px solid #555;border-left:5px solid #d97706;border-radius:5px;
+    max-width:310px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.18)'>
+    <b style='font-size:14px'>♨ PTES Engineering Screening</b><br>
+    <span style='color:#555'>Kuruba Pujari Gopal<br>Rother und Partner Ingenieurgesellschaft</span><hr style='margin:7px 0'>
+    Leading candidate: {best['Candidate']}<br>
     Storage volume: {best['Storage volume [m³]']:.0f} m³<br>
     Excavation footprint: {best['PTES excavation footprint [m²]']:.0f} m²<br>
     Land incl. embankment: {best['Land take incl. embankment [m²]']:.0f} m²<br>
     Total construction site needed: {best['Total construction site needed [m²]']:.0f} m²<br>
     Connection: {best['Connection [m]']:.1f} m · branch DN {best['Branch DN']}<br>
+    Score criteria used: {len(selected_scoring_criteria)} of {len(SCORING_CRITERIA)}<br>
+    <span style='font-size:10px'>{' · '.join(selected_scoring_criteria)}</span><br>
     Optional authority layers loaded: {loaded_optional}/{len(optional_layers)}<br>
     Missing layers remain not assessed.</div>"""
     result_map.get_root().html.add_child(folium.Element(summary_panel))
     folium.LayerControl(collapsed=False).add_to(result_map)
+    # streamlit-folium adds its own synchronisation map object to the Folium root.
+    # Capture the standalone export first so the downloaded file contains one map only.
+    standalone_html = result_map.get_root().render().encode("utf-8")
     map_placeholder.empty()
     with map_placeholder.container():
         st_folium(result_map, height=700, width=None, key="results", returned_objects=[])
-    st.download_button("Download interactive HTML map", result_map.get_root().render().encode("utf-8"), "ptes_candidate_comparison_map.html", "text/html")
+    st.download_button("Download interactive HTML map", standalone_html, "ptes_candidate_comparison_map.html", "text/html")
     st.download_button("Download comparison CSV", ranking.to_csv(index=False).encode("utf-8"), "ptes_candidate_comparison.csv", "text/csv")
     st.download_button("Download GIS data register", register.to_csv(index=False).encode("utf-8"), "ptes_data_register.csv", "text/csv")
     st.download_button("Download complete engineering Excel workbook",
