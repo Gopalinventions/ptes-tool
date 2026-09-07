@@ -10,6 +10,7 @@ from shapely.geometry import LineString, Point, box
 from streamlit_folium import st_folium
 
 from calculations import (assess_main_pipe, darcy_weisbach_pressure_loss,
+                          engineering_suitability_score,
                           geodetic_pressure_correction, required_flow,
                           size_connection_pipe, size_storage_from_demand,
                           storage_capacity, suitability_score, truncated_pit_geometry)
@@ -30,6 +31,8 @@ st.caption("Place and compare Storage A, B and C. Click buildings and pipes to i
 
 if "candidates" not in st.session_state:
     st.session_state.candidates = {}
+if "energy_hub_index" not in st.session_state:
+    st.session_state.energy_hub_index = None
 
 BUILDING_FIELDS = {
     "b_building_name": "Building", "b_addr_street": "Street",
@@ -101,7 +104,7 @@ def nearby_map_layers(layers, candidates, metric_crs, radius_m):
 
 
 def excel_workbook(candidate_results, data_register, seasonal_results=None, monthly_results=None):
-    """Create one engineering workbook with tabular results and provenance."""
+    """Create one workbook with all important outputs on one summary sheet."""
     def excel_safe_frame(frame):
         """Return an Excel-compatible copy; Excel cannot store timezone-aware datetimes."""
         safe = frame.copy()
@@ -117,12 +120,22 @@ def excel_workbook(candidate_results, data_register, seasonal_results=None, mont
 
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        excel_safe_frame(candidate_results).to_excel(writer, sheet_name="Candidate results", index=False)
-        excel_safe_frame(data_register).to_excel(writer, sheet_name="GIS data register", index=False)
+        sheet_name = "Engineering Summary"
+        row = 1
+        excel_safe_frame(candidate_results).to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
+        sheet = writer.sheets[sheet_name]
+        sheet.cell(row=1, column=1, value="PTES candidate comparison")
+        row += len(candidate_results) + 4
+        sheet.cell(row=row, column=1, value="GIS data register")
+        excel_safe_frame(data_register).to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
+        row += len(data_register) + 3
         if seasonal_results is not None and not seasonal_results.empty:
-            excel_safe_frame(seasonal_results).to_excel(writer, sheet_name="Seasonal demand", index=False)
+            sheet.cell(row=row, column=1, value="Weather-derived seasonal demand")
+            excel_safe_frame(seasonal_results).to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
+            row += len(seasonal_results) + 3
         if monthly_results is not None and not monthly_results.empty:
-            excel_safe_frame(monthly_results).to_excel(writer, sheet_name="Monthly demand", index=False)
+            sheet.cell(row=row, column=1, value="Weather-derived monthly demand")
+            excel_safe_frame(monthly_results).to_excel(writer, sheet_name=sheet_name, index=False, startrow=row)
         for sheet in writer.book.worksheets:
             sheet.freeze_panes = "A2"
             sheet.auto_filter.ref = sheet.dimensions
@@ -214,9 +227,42 @@ def marker(fmap, name, lat, lon, result=None):
                   icon=folium.Icon(color=COLORS[name], icon="info-sign")).add_to(fmap)
 
 
+def energy_hub_marker(fmap, lat, lon, label):
+    folium.Marker(
+        [lat, lon], tooltip=f"Energy hub: {label}",
+        popup=folium.Popup(f"<b>Selected energy hub</b><br>{label}", max_width=320),
+        icon=folium.Icon(color="red", icon="wrench", prefix="fa"),
+    ).add_to(fmap)
+
+
 with st.sidebar:
-    uploaded = st.file_uploader("Upload nPro GeoJSON", type=["geojson", "json"])
-    with st.expander("Official GIS layers (optional)"):
+    with st.expander("1 · nPro network data", expanded=True):
+        uploaded = st.file_uploader("Upload nPro GeoJSON", type=["geojson", "json"])
+        st.caption("Buildings and existing district-heating pipes are read from this file.")
+        hub_selector_placeholder = st.empty()
+    with st.expander("2 · Demand and storage sizing", expanded=True):
+        annual_demand = st.number_input("Annual system heat demand [MWh/year]", 1.0, value=20000.0)
+        storage_type = st.selectbox("Storage type", ["Seasonal", "Weekly", "Daily"])
+        coverage = st.slider("Demand shifted by storage [%]", 1.0, 100.0, 30.0)
+        storage_volume_mode = st.selectbox("Storage-volume method", ["Calculate from demand", "Use available volume"])
+        available_storage_volume = st.number_input(
+            "Available PTES volume [m³]", 1.0, value=50000.0,
+            disabled=storage_volume_mode != "Use available volume",
+        )
+        tmax = st.number_input("Maximum temperature [°C]", value=90.0)
+        tmin = st.number_input("Minimum temperature [°C]", value=15.0)
+        efficiency = st.slider("Storage efficiency", .5, 1.0, .8)
+        reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
+    with st.expander("3 · Charging and discharging", expanded=True):
+        operating_mode = st.selectbox("Operating mode", ["Charging", "Discharging", "Idle"])
+        power = st.number_input("Charge/discharge power [kW]", 1.0, value=3300.0)
+        delta_t = st.number_input("Design ΔT [K]", 1.0, value=30.0)
+        branch_dn_options = [50, 65, 80, 100, 125, 150, 200, 250, 300]
+        minimum_branch_dn = st.selectbox("Minimum PTES branch DN", branch_dn_options,
+                                         index=branch_dn_options.index(150))
+        maximum_branch_dn = st.selectbox("Maximum PTES branch DN", branch_dn_options,
+                                         index=branch_dn_options.index(250))
+    with st.expander("4 · Official GIS layers"):
         st.caption("Upload authority-supplied GeoJSON layers. Missing layers are reported as not assessed.")
         parcels_file = st.file_uploader("Candidate parcels", type=["geojson", "json"], key="parcels")
         groundwater_file = st.file_uploader("Groundwater observations", type=["geojson", "json"], key="groundwater")
@@ -224,38 +270,12 @@ with st.sidebar:
         protected_file = st.file_uploader("Protected areas", type=["geojson", "json"], key="protected")
         roads_file = st.file_uploader("Roads", type=["geojson", "json"], key="roads")
         utilities_file = st.file_uploader("Known utilities", type=["geojson", "json"], key="utilities")
-    st.header("PTES design")
-    annual_demand = st.number_input("Annual system heat demand [MWh/year]", 1.0, value=20000.0)
-    storage_type = st.selectbox("Storage type", ["Seasonal", "Weekly", "Daily"])
-    coverage = st.slider("Demand shifted by storage [%]", 1.0, 100.0, 30.0)
-    storage_volume_mode = st.selectbox("Storage-volume method", ["Calculate from demand", "Use available volume"])
-    available_storage_volume = st.number_input(
-        "Available PTES volume [m³]", 1.0, value=50000.0,
-        disabled=storage_volume_mode != "Use available volume",
-    )
-    tmax = st.number_input("Maximum temperature [°C]", value=90.0)
-    tmin = st.number_input("Minimum temperature [°C]", value=15.0)
-    efficiency = st.slider("Efficiency", .5, 1.0, .8)
-    power = st.number_input("Charge/discharge power [kW]", 1.0, value=3300.0)
-    delta_t = st.number_input("Design ΔT [K]", 1.0, value=30.0)
-    branch_dn_options = [50, 65, 80, 100, 125, 150, 200, 250, 300]
-    minimum_branch_dn = st.selectbox(
-        "Minimum PTES branch DN", branch_dn_options,
-        index=branch_dn_options.index(150),
-        help="DN150 is the project screening floor. Final sizing must be checked hydraulically.",
-    )
-    maximum_branch_dn = st.selectbox(
-        "Maximum PTES branch DN", branch_dn_options,
-        index=branch_dn_options.index(250),
-        help="Increase only when the design flow cannot remain within the velocity limit.",
-    )
-    operating_mode = st.selectbox("Operating mode", ["Charging", "Discharging", "Idle"])
-    with st.expander("Weather-derived demand profile"):
+    with st.expander("5 · Weather-derived demand"):
         weather_source = st.selectbox("Weather-data source", ["Not supplied", "DWD TRY", "ERA5-Land", "Other hourly CSV"])
         weather_file = st.file_uploader("Weather CSV or TXT", type=["csv", "txt"], key="weather")
         dhw_share = st.number_input("Domestic-hot-water share [%]", 0.0, 99.0, value=12.0)
         heating_limit = st.number_input("Heating-limit temperature [°C]", value=15.0)
-    with st.expander("Advanced geometry and pressure"):
+    with st.expander("6 · Advanced geometry and pressure"):
         depth = st.number_input("Usable pit depth [m]", 1.0, value=15.0)
         side_slope = st.number_input("Side slope H:V", .1, value=2.0)
         aspect_ratio = st.number_input("Length-to-width ratio", .2, value=1.0)
@@ -265,7 +285,6 @@ with st.sidebar:
         construction_clearance = st.number_input("Construction working clearance [m]", 0.0, value=20.0)
         parcel_radius = st.number_input("Nearby GIS investigation radius [m]", 100.0, value=1000.0,
                                         help="Only nearby parcel and context features are drawn on the map.")
-    reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
 
 st.sidebar.markdown(
     """
@@ -386,6 +405,25 @@ demand_options = [c for c in buildings_m.columns if c != "geometry"]
 preferred = next((c for c in ("b_heat_import_sum_MWh", "b_space_heat_sum_MWh") if c in demand_options), demand_options[0])
 demand_col = st.selectbox("Annual heat-demand column", demand_options, index=demand_options.index(preferred))
 buildings_m[demand_col] = pd.to_numeric(buildings_m[demand_col], errors="coerce").fillna(0)
+buildings_m = buildings_m.reset_index(drop=True)
+hub_name_field = next((c for c in ("b_building_name", "b_addr_street", "b_building_type")
+                       if c in buildings_m.columns), None)
+hub_labels = []
+for index, building in buildings_m.iterrows():
+    name = str(building.get(hub_name_field, "Building")) if hub_name_field else "Building"
+    street = str(building.get("b_addr_street", ""))
+    number = str(building.get("b_addr_house_number", ""))
+    address = " ".join(part for part in (street, number) if part and part != "nan").strip()
+    hub_labels.append(f"{index}: {name}" + (f" — {address}" if address else ""))
+if not hub_labels:
+    st.error("The nPro file contains no buildings that can be selected as an energy hub.")
+    st.stop()
+default_hub = 0 if st.session_state.energy_hub_index is None else min(st.session_state.energy_hub_index, len(hub_labels) - 1)
+selected_hub_label = hub_selector_placeholder.selectbox("Selected energy-hub building", hub_labels, index=default_hub)
+selected_hub_index = int(selected_hub_label.split(":", 1)[0])
+st.session_state.energy_hub_index = selected_hub_index
+hub_geometry_m = buildings_m.geometry.iloc[selected_hub_index].representative_point()
+hub_geometry_wgs = gpd.GeoSeries([hub_geometry_m], crs=metric_crs).to_crs(4326).iloc[0]
 buildings_wgs, pipes_wgs = json_safe(buildings_m.to_crs(4326)), json_safe(pipes_m.to_crs(4326))
 b = pipes_wgs.total_bounds
 center = [(b[1] + b[3]) / 2, (b[0] + b[2]) / 2]
@@ -393,7 +431,10 @@ center = [(b[1] + b[3]) / 2, (b[0] + b[2]) / 2]
 st.subheader("Candidate placement")
 map_theme = st.selectbox("Colour pipelines by", list(THEMES))
 slot = st.radio("Candidate to place", list(COLORS), horizontal=True)
-placement = st.toggle("Placement mode", True, help="Turn off to inspect popups without moving a candidate.")
+interaction_mode = st.radio(
+    "Map interaction", ["Place storage", "Select energy hub", "Inspect"], horizontal=True,
+    help="In energy-hub mode, click a building and the nearest building becomes the selected hub.",
+)
 c1, c2, _ = st.columns([1, 1, 4])
 if c1.button("Remove selected"):
     st.session_state.candidates.pop(slot, None)
@@ -405,6 +446,7 @@ if c2.button("Clear all"):
 select_map = folium.Map(center, zoom_start=15, tiles=None)
 add_basemaps(select_map)
 add_network(select_map, buildings_wgs, pipes_wgs, map_theme)
+energy_hub_marker(select_map, hub_geometry_wgs.y, hub_geometry_wgs.x, selected_hub_label.split(":", 1)[1].strip())
 current_candidates = [
     {"Candidate": name, "Latitude": item["lat"], "Longitude": item["lon"]}
     for name, item in st.session_state.candidates.items()
@@ -413,6 +455,11 @@ map_context_layers = nearby_map_layers(optional_layers, current_candidates, metr
 add_optional_layers(select_map, map_context_layers)
 for name, xy in st.session_state.candidates.items():
     marker(select_map, name, xy["lat"], xy["lon"])
+    folium.PolyLine(
+        [[hub_geometry_wgs.y, hub_geometry_wgs.x], [xy["lat"], xy["lon"]]],
+        color="#C62828", weight=4, dash_array="8 5",
+        tooltip=f"Energy hub to {name}",
+    ).add_to(select_map)
     if xy.get("route"):
         folium.PolyLine([[lat, lon] for lon, lat in xy["route"]], color=COLORS[name], weight=6,
                         tooltip=f"{name} manually routed connection").add_to(select_map)
@@ -421,15 +468,24 @@ Draw(export=False, position="topleft",
                    "circle": False, "marker": False, "circlemarker": False},
      edit_options={"edit": True, "remove": True}).add_to(select_map)
 folium.LayerControl(collapsed=False).add_to(select_map)
-state = st_folium(select_map, height=620, width=None, key="selection",
-                  returned_objects=["last_clicked", "all_drawings"])
+map_placeholder = st.empty()
+with map_placeholder.container():
+    state = st_folium(select_map, height=620, width=None, key="selection",
+                      returned_objects=["last_clicked", "all_drawings"])
 clicked = state.get("last_clicked") if state else None
-if placement and clicked:
+if interaction_mode == "Place storage" and clicked:
     point = {"lat": float(clicked["lat"]), "lon": float(clicked["lng"])}
     previous = st.session_state.candidates.get(slot, {})
     point["route"] = previous.get("route")
     if previous.get("lat") != point["lat"] or previous.get("lon") != point["lon"]:
         st.session_state.candidates[slot] = point
+        st.rerun()
+elif interaction_mode == "Select energy hub" and clicked:
+    clicked_m = gpd.GeoSeries([Point(clicked["lng"], clicked["lat"])], crs=4326).to_crs(metric_crs).iloc[0]
+    distances = buildings_m.geometry.distance(clicked_m)
+    nearest_hub_index = int(distances.idxmin())
+    if st.session_state.energy_hub_index != nearest_hub_index:
+        st.session_state.energy_hub_index = nearest_hub_index
         st.rerun()
 drawings = state.get("all_drawings") if state else None
 if drawings:
@@ -476,8 +532,10 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                 f"{velocity:.2f} m/s. Review capital cost, heat loss and controllability."
             )
         rows, map_items = [], []
+        loaded_optional = sum(layer is not None for layer in optional_layers.values())
         for candidate in candidate_table.to_dict("records"):
             pt = gpd.GeoSeries([Point(candidate["Longitude"], candidate["Latitude"])], crs=4326).to_crs(metric_crs).iloc[0]
+            hub_to_storage_distance = float(pt.distance(hub_geometry_m))
             excavation = translate(rotate(box(-geometry["top_length_m"]/2, -geometry["top_width_m"]/2,
                                                    geometry["top_length_m"]/2, geometry["top_width_m"]/2),
                                            rotation, origin=(0, 0)), pt.x, pt.y)
@@ -528,9 +586,21 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                 None if groundwater_level_field == "Not supplied" else groundwater_level_field,
             )
             parcel_fit_ratio = 1.0 if parcel["parcel_area_m2"] is None else parcel["parcel_area_m2"] / construction.area
-            score, status, _ = suitability_score(parcel_fit_ratio, distance, demand500, pressure["pressure_risk"], reference_demand)
+            score, status, criteria = engineering_suitability_score(
+                hub_selected=True, hub_distance_m=hub_to_storage_distance,
+                land_ratio=parcel_fit_ratio, connection_m=distance,
+                demand_500_mwh=demand500, reference_demand_mwh=reference_demand,
+                pressure_risk=pressure["pressure_risk"], velocity_m_s=velocity,
+                capacity_status=main_check["capacity_status"],
+                flood_overlap_m2=flood_overlap, protected_overlap_m2=protected_overlap,
+                utility_crossings=utility_crossings, loaded_optional_layers=loaded_optional,
+                total_optional_layers=len(optional_layers),
+            )
+            criterion_scores = dict(zip(criteria["Criterion"], criteria["Criterion score [%]"]))
             row = {"Candidate": candidate["Candidate"], "Latitude": candidate["Latitude"], "Longitude": candidate["Longitude"],
                    "Score [%]": score, "Screening classification": status,
+                   "Energy hub": selected_hub_label.split(":", 1)[1].strip(),
+                   "Hub-to-storage distance [m]": hub_to_storage_distance,
                    "Connection [m]": distance, "Demand 500 m [MWh/year]": demand500,
                    "Storage volume [m³]": storage["volume_m3"], "Energy/cycle [MWh]": storage["energy_per_cycle_mwh"],
                    "PTES excavation footprint [m²]": excavation.area,
@@ -560,7 +630,8 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                    "Supply pressure at candidate [bar]": supply_at_candidate,
                    "Return pressure at candidate [bar]": return_at_candidate,
                    "Main flow after scenario [m³/h]": main_check["new_flow_m3_h"],
-                   "Capacity status": main_check["capacity_status"]}
+                   "Capacity status": main_check["capacity_status"],
+                   **{f"Score — {name} [%]": value for name, value in criterion_scores.items()}}
             rows.append(row)
             def boundary_layer(label, shape):
                 return gpd.GeoDataFrame({"Candidate": [candidate["Candidate"]], "Boundary": [label]},
@@ -579,11 +650,60 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     a.metric("Best candidate", ranking.iloc[0]["Candidate"])
     b.metric("Best score", f"{ranking.iloc[0]['Score [%]']:.1f}%")
     c.metric("Shortest connection", f"{ranking['Connection [m]'].min():.1f} m")
-    st.dataframe(ranking.round(3), hide_index=True, use_container_width=True)
+    summary_columns = ["Candidate", "Score [%]", "Screening classification", "Energy hub",
+                       "Hub-to-storage distance [m]", "Connection [m]", "Branch DN",
+                       "Velocity [m/s]", "Pressure risk", "Capacity status"]
+    st.dataframe(ranking[summary_columns].round(2), hide_index=True, use_container_width=True)
     st.bar_chart(ranking.set_index("Candidate")[["Score [%]"]])
+    st.subheader("Stepwise engineering results")
+    for _, result in ranking.iterrows():
+        with st.expander(
+            f"{result['Candidate']} · {result['Score [%]']:.1f}% · {result['Screening classification']}",
+            expanded=result["Candidate"] == ranking.iloc[0]["Candidate"],
+        ):
+            st.markdown("**1. Demand and storage**")
+            x1, x2, x3 = st.columns(3)
+            x1.metric("Storage volume", f"{result['Storage volume [m³]']:,.0f} m³")
+            x2.metric("Energy per cycle", f"{result['Energy/cycle [MWh]']:,.1f} MWh")
+            x3.metric("Demand within 500 m", f"{result['Demand 500 m [MWh/year]']:,.0f} MWh/year")
+            st.markdown("**2. Energy hub and network route**")
+            st.write(f"Energy hub: {result['Energy hub']}")
+            st.write(f"Hub → storage: {result['Hub-to-storage distance [m]']:.1f} m")
+            st.write(f"Storage → existing network: {result['Connection [m]']:.1f} m")
+            st.markdown("**3. Hydraulic compatibility**")
+            h1, h2, h3, h4 = st.columns(4)
+            h1.metric("Branch", f"DN {int(result['Branch DN'])}")
+            h2.metric("Flow", f"{result['Flow [m³/h]']:.1f} m³/h")
+            h3.metric("Velocity", f"{result['Velocity [m/s]']:.2f} m/s")
+            h4.metric("Circuit loss", f"{result['Round-trip pressure loss [bar]']:.2f} bar")
+            st.write(f"{result['Branch sizing status']} · {result['Capacity status']}")
+            st.markdown("**4. Land, construction and constraints**")
+            land_table = pd.DataFrame({
+                "Result": ["Excavation footprint", "Land incl. embankment", "Total construction site",
+                           "Outside parcel", "Flood overlap", "Protected-area overlap",
+                           "Utility crossings", "Nearest groundwater observation"],
+                "Value": [f"{result['PTES excavation footprint [m²]']:.0f} m²",
+                          f"{result['Land take incl. embankment [m²]']:.0f} m²",
+                          f"{result['Total construction site needed [m²]']:.0f} m²",
+                          "Not assessed" if pd.isna(result['Construction outside parcel [m²]']) else f"{result['Construction outside parcel [m²]']:.0f} m²",
+                          "Not assessed" if pd.isna(result['Flood-zone overlap [m²]']) else f"{result['Flood-zone overlap [m²]']:.0f} m²",
+                          "Not assessed" if pd.isna(result['Protected-area overlap [m²]']) else f"{result['Protected-area overlap [m²]']:.0f} m²",
+                          "Not assessed" if pd.isna(result['Utility crossings [count]']) else str(int(result['Utility crossings [count]'])),
+                          "Not assessed" if pd.isna(result['Nearest groundwater observation [m]']) else f"{result['Nearest groundwater observation [m]']:.0f} m"],
+            })
+            st.dataframe(land_table, hide_index=True, use_container_width=True)
+            st.markdown("**5. Weighted suitability criteria**")
+            score_columns = [column for column in ranking.columns if column.startswith("Score —")]
+            score_table = pd.DataFrame({
+                "Criterion": [column.removeprefix("Score — ").removesuffix(" [%]") for column in score_columns],
+                "Score [%]": [result[column] for column in score_columns],
+            })
+            st.dataframe(score_table.round(1), hide_index=True, use_container_width=True)
     result_map = folium.Map(center, zoom_start=15, tiles=None)
     add_basemaps(result_map)
     add_network(result_map, buildings_wgs, pipes_wgs, map_theme)
+    energy_hub_marker(result_map, hub_geometry_wgs.y, hub_geometry_wgs.x,
+                      selected_hub_label.split(":", 1)[1].strip())
     add_optional_layers(result_map, map_context_layers)
     for result, connection, excavation, embankment, construction in map_items:
         name, color = result["Candidate"], COLORS[result["Candidate"]]
@@ -595,10 +715,14 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                                                  "fillColor": "#D69E2E", "fillOpacity": .15}).add_to(result_map)
         folium.GeoJson(connection, name=f"{name} connection", style_function=lambda _, col=color: {"color": col, "weight": 6},
                        tooltip=f"{name}: {result['Connection [m]']:.1f} m").add_to(result_map)
+        folium.PolyLine(
+            [[hub_geometry_wgs.y, hub_geometry_wgs.x], [result["Latitude"], result["Longitude"]]],
+            color="#C62828", weight=4, dash_array="8 5",
+            tooltip=f"Energy hub to {name}: {result['Hub-to-storage distance [m]']:.1f} m",
+        ).add_to(result_map)
         folium.GeoJson(excavation, name=f"{name} excavation boundary", style_function=lambda _, col=color: {"color": col, "weight": 3, "fillColor": col, "fillOpacity": .38}).add_to(result_map)
         marker(result_map, name, result["Latitude"], result["Longitude"], result)
     best = ranking.iloc[0]
-    loaded_optional = sum(layer is not None for layer in optional_layers.values())
     summary_panel = f"""<div style='position:fixed;top:18px;right:18px;z-index:9999;background:white;
     padding:12px;border:1px solid #555;max-width:285px;font-size:12px'>
     <b>PTES engineering screening</b><br>Leading candidate: {best['Candidate']}<br>
@@ -611,8 +735,9 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     Missing layers remain not assessed.</div>"""
     result_map.get_root().html.add_child(folium.Element(summary_panel))
     folium.LayerControl(collapsed=False).add_to(result_map)
-    st.subheader("Combined interactive result map")
-    st_folium(result_map, height=700, width=None, key="results", returned_objects=[])
+    map_placeholder.empty()
+    with map_placeholder.container():
+        st_folium(result_map, height=700, width=None, key="results", returned_objects=[])
     st.download_button("Download interactive HTML map", result_map.get_root().render().encode("utf-8"), "ptes_candidate_comparison_map.html", "text/html")
     st.download_button("Download comparison CSV", ranking.to_csv(index=False).encode("utf-8"), "ptes_candidate_comparison.csv", "text/csv")
     st.download_button("Download GIS data register", register.to_csv(index=False).encode("utf-8"), "ptes_data_register.csv", "text/csv")
