@@ -12,13 +12,17 @@ from streamlit_folium import st_folium
 from calculations import (assess_main_pipe, darcy_weisbach_pressure_loss,
                           geodetic_pressure_correction, required_flow,
                           size_connection_pipe, size_storage_from_demand,
-                          suitability_score, truncated_pit_geometry)
+                          storage_capacity, suitability_score, truncated_pit_geometry)
 from gis_analysis import clean_geometry, local_metric_crs, nearby_demand, nearest_pipe_connection, split_layers
 from spatial_analysis import (containing_parcel_measurements,
                               intersecting_feature_count,
                               nearest_distance_m,
                               nearest_point_attribute,
                               overlap_area_m2, read_uploaded_vector)
+from weather_analysis import (TEMPERATURE_HINTS, TIMESTAMP_HINTS,
+                              build_weather_demand_profile, monthly_summary,
+                              read_weather_table, seasonal_summary,
+                              suggested_column)
 
 st.set_page_config(page_title="PTES Comparison Tool", page_icon="♨️", layout="wide")
 st.title("PTES Location and Network Integration Tool")
@@ -96,12 +100,16 @@ def nearby_map_layers(layers, candidates, metric_crs, radius_m):
     return nearby
 
 
-def excel_workbook(candidate_results, data_register):
+def excel_workbook(candidate_results, data_register, seasonal_results=None, monthly_results=None):
     """Create one engineering workbook with tabular results and provenance."""
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         candidate_results.to_excel(writer, sheet_name="Candidate results", index=False)
         data_register.to_excel(writer, sheet_name="GIS data register", index=False)
+        if seasonal_results is not None and not seasonal_results.empty:
+            seasonal_results.to_excel(writer, sheet_name="Seasonal demand", index=False)
+        if monthly_results is not None and not monthly_results.empty:
+            monthly_results.to_excel(writer, sheet_name="Monthly demand", index=False)
         for sheet in writer.book.worksheets:
             sheet.freeze_panes = "A2"
             sheet.auto_filter.ref = sheet.dimensions
@@ -207,12 +215,22 @@ with st.sidebar:
     annual_demand = st.number_input("Annual system heat demand [MWh/year]", 1.0, value=20000.0)
     storage_type = st.selectbox("Storage type", ["Seasonal", "Weekly", "Daily"])
     coverage = st.slider("Demand shifted by storage [%]", 1.0, 100.0, 30.0)
+    storage_volume_mode = st.selectbox("Storage-volume method", ["Calculate from demand", "Use available volume"])
+    available_storage_volume = st.number_input(
+        "Available PTES volume [m³]", 1.0, value=50000.0,
+        disabled=storage_volume_mode != "Use available volume",
+    )
     tmax = st.number_input("Maximum temperature [°C]", value=90.0)
     tmin = st.number_input("Minimum temperature [°C]", value=15.0)
     efficiency = st.slider("Efficiency", .5, 1.0, .8)
     power = st.number_input("Charge/discharge power [kW]", 1.0, value=3300.0)
     delta_t = st.number_input("Design ΔT [K]", 1.0, value=30.0)
     operating_mode = st.selectbox("Operating mode", ["Charging", "Discharging", "Idle"])
+    with st.expander("Weather-derived demand profile"):
+        weather_source = st.selectbox("Weather-data source", ["Not supplied", "DWD TRY", "ERA5-Land", "Other hourly CSV"])
+        weather_file = st.file_uploader("Weather CSV or TXT", type=["csv", "txt"], key="weather")
+        dhw_share = st.number_input("Domestic-hot-water share [%]", 0.0, 99.0, value=12.0)
+        heating_limit = st.number_input("Heating-limit temperature [°C]", value=15.0)
     with st.expander("Advanced geometry and pressure"):
         depth = st.number_input("Usable pit depth [m]", 1.0, value=15.0)
         side_slope = st.number_input("Side slope H:V", .1, value=2.0)
@@ -269,6 +287,51 @@ register = pd.DataFrame(data_register)
 with st.expander("GIS data register", expanded=True):
     st.caption("This register records which measured datasets are available for the current investigation.")
     st.dataframe(register, hide_index=True, use_container_width=True)
+
+weather_seasonal = pd.DataFrame()
+weather_monthly = pd.DataFrame()
+if weather_source != "Not supplied" and weather_file is not None:
+    try:
+        weather_table = read_weather_table(weather_file.getvalue())
+        weather_columns = list(weather_table.columns)
+        timestamp_guess = suggested_column(weather_columns, TIMESTAMP_HINTS)
+        temperature_guess = suggested_column(weather_columns, TEMPERATURE_HINTS)
+        st.subheader("Weather-derived seasonal demand")
+        wc1, wc2 = st.columns(2)
+        timestamp_column = wc1.selectbox(
+            "Weather timestamp column", weather_columns,
+            index=weather_columns.index(timestamp_guess),
+        )
+        temperature_column = wc2.selectbox(
+            "Outdoor-temperature column", weather_columns,
+            index=weather_columns.index(temperature_guess),
+        )
+        weather_profile = build_weather_demand_profile(
+            weather_table, timestamp_column, temperature_column,
+            annual_demand, dhw_share, heating_limit,
+        )
+        if storage_volume_mode == "Use available volume":
+            comparison_volume = available_storage_volume
+        else:
+            comparison_volume = size_storage_from_demand(
+                annual_demand, coverage, storage_type, tmax, tmin, efficiency
+            )["volume_m3"]
+        comparison_capacity = storage_capacity(comparison_volume, tmax, tmin, efficiency)
+        weather_seasonal = seasonal_summary(weather_profile, comparison_capacity["useful_capacity_mwh"])
+        weather_monthly = monthly_summary(weather_profile)
+        w1, w2, w3 = st.columns(3)
+        w1.metric("Profile records", f"{len(weather_profile):,}")
+        w2.metric("Compared PTES volume", f"{comparison_volume:,.0f} m³")
+        w3.metric("Usable stored heat", f"{comparison_capacity['useful_capacity_mwh']:,.0f} MWh")
+        st.dataframe(weather_seasonal.round(2), hide_index=True, use_container_width=True)
+        chart_data = weather_monthly.set_index("month")[["demand_mwh"]]
+        st.bar_chart(chart_data, y_label="Heat demand [MWh/month]")
+        st.caption(
+            f"{weather_source} temperature-derived synthetic demand profile. "
+            "It is normalized to the entered annual demand and is not a measured network load profile."
+        )
+    except Exception as exc:
+        st.error(f"Weather profile could not be calculated: {exc}")
 
 groundwater_layer = optional_layers["Groundwater"]
 groundwater_fields = [] if groundwater_layer is None else [c for c in groundwater_layer.columns if c != "geometry"]
@@ -344,7 +407,18 @@ if not candidate_table.empty:
 
 if st.button("Analyse and compare", type="primary", disabled=candidate_table.empty):
     try:
-        storage = size_storage_from_demand(annual_demand, coverage, storage_type, tmax, tmin, efficiency)
+        if storage_volume_mode == "Calculate from demand":
+            storage = size_storage_from_demand(annual_demand, coverage, storage_type, tmax, tmin, efficiency)
+        else:
+            capacity = storage_capacity(available_storage_volume, tmax, tmin, efficiency)
+            cycles = {"Seasonal": 1, "Weekly": 52, "Daily": 365}[storage_type]
+            storage = {
+                "volume_m3": available_storage_volume,
+                "energy_per_cycle_mwh": capacity["useful_capacity_mwh"],
+                "annual_shifted_mwh": capacity["useful_capacity_mwh"] * cycles,
+                "cycles_per_year": cycles,
+                "delta_t_k": capacity["delta_t_k"],
+            }
         geometry = truncated_pit_geometry(storage["volume_m3"], depth, side_slope, aspect_ratio)
         flow = required_flow(power, delta_t)
         _, dn, diameter, velocity = size_connection_pipe(flow["volume_flow_m3_s"])
@@ -485,7 +559,8 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     st.download_button("Download comparison CSV", ranking.to_csv(index=False).encode("utf-8"), "ptes_candidate_comparison.csv", "text/csv")
     st.download_button("Download GIS data register", register.to_csv(index=False).encode("utf-8"), "ptes_data_register.csv", "text/csv")
     st.download_button("Download complete engineering Excel workbook",
-                       excel_workbook(ranking, register), "ptes_engineering_results.xlsx",
+                       excel_workbook(ranking, register, weather_seasonal, weather_monthly),
+                       "ptes_engineering_results.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.divider()
