@@ -102,14 +102,27 @@ def nearby_map_layers(layers, candidates, metric_crs, radius_m):
 
 def excel_workbook(candidate_results, data_register, seasonal_results=None, monthly_results=None):
     """Create one engineering workbook with tabular results and provenance."""
+    def excel_safe_frame(frame):
+        """Return an Excel-compatible copy; Excel cannot store timezone-aware datetimes."""
+        safe = frame.copy()
+        for column in safe.columns:
+            if isinstance(safe[column].dtype, pd.DatetimeTZDtype):
+                safe[column] = safe[column].dt.tz_convert("UTC").dt.tz_localize(None)
+            elif safe[column].dtype == "object":
+                safe[column] = safe[column].map(
+                    lambda value: value.tz_convert("UTC").tz_localize(None)
+                    if isinstance(value, pd.Timestamp) and value.tzinfo is not None else value
+                )
+        return safe
+
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        candidate_results.to_excel(writer, sheet_name="Candidate results", index=False)
-        data_register.to_excel(writer, sheet_name="GIS data register", index=False)
+        excel_safe_frame(candidate_results).to_excel(writer, sheet_name="Candidate results", index=False)
+        excel_safe_frame(data_register).to_excel(writer, sheet_name="GIS data register", index=False)
         if seasonal_results is not None and not seasonal_results.empty:
-            seasonal_results.to_excel(writer, sheet_name="Seasonal demand", index=False)
+            excel_safe_frame(seasonal_results).to_excel(writer, sheet_name="Seasonal demand", index=False)
         if monthly_results is not None and not monthly_results.empty:
-            monthly_results.to_excel(writer, sheet_name="Monthly demand", index=False)
+            excel_safe_frame(monthly_results).to_excel(writer, sheet_name="Monthly demand", index=False)
         for sheet in writer.book.worksheets:
             sheet.freeze_panes = "A2"
             sheet.auto_filter.ref = sheet.dimensions
@@ -242,6 +255,23 @@ with st.sidebar:
         parcel_radius = st.number_input("Nearby GIS investigation radius [m]", 100.0, value=1000.0,
                                         help="Only nearby parcel and context features are drawn on the map.")
     reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
+
+st.sidebar.markdown(
+    """
+    <div style="margin-top:1.5rem;padding:0.85rem 0.9rem;border:1px solid #d7dee8;
+                border-left:5px solid #d97706;border-radius:0.55rem;background:#f8fafc;
+                color:#172033;line-height:1.35;">
+      <div style="font-size:1.05rem;font-weight:700;">♨️ PTES Energy Screening</div>
+      <div style="font-size:0.78rem;margin-top:0.45rem;">Developed by<br>
+        <strong>Kuruba Pujari Gopal</strong>
+      </div>
+      <div style="font-size:0.76rem;margin-top:0.4rem;color:#52606d;">
+        Rother und Partner Ingenieurgesellschaft
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 if uploaded is None:
     st.info("Upload an nPro GeoJSON file to start.")
