@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from designer_integration import design_geometry, designer_html
+from thermal_ui import render_thermal
 from folium.features import GeoJsonPopup
 from folium.plugins import Draw
 from shapely.affinity import rotate, translate
@@ -312,25 +313,30 @@ with st.sidebar:
         uploaded = st.file_uploader("Upload nPro GeoJSON", type=["geojson", "json"])
         st.caption("Buildings and existing district-heating pipes are read from this file.")
         hub_selector_placeholder = st.empty()
-    with st.expander("2 · Demand and storage sizing", expanded=True):
+    with st.expander("2 · Storage size and geometry", expanded=True):
+        st.caption("Sets the water volume and physical pit dimensions for drawings, GIS and thermal layers.")
         storage_volume_mode = st.selectbox("Storage-volume method", ["Use available volume", "Calculate from demand"])
         available_storage_volume = st.number_input(
             "Target water volume [m³]", 1.0, value=125000.0,
             disabled=storage_volume_mode != "Use available volume",
         )
         depth = st.number_input("Total pit depth, including freeboard [m]", 1.0, value=15.0)
-    with st.expander("2b · Demand and temperature settings", expanded=storage_volume_mode == "Calculate from demand"):
+    with st.expander("2b · Network demand and static capacity estimate", expanded=storage_volume_mode == "Calculate from demand"):
+        st.caption("Annual demand supplies GIS/weather context. Coverage sizes the pit only in demand-based mode. These are static estimates, not hourly operating conditions.")
         annual_demand = st.number_input("Annual system heat demand [MWh/year]", 1.0, value=20000.0)
         storage_type = st.selectbox("Storage type", ["Seasonal", "Weekly", "Daily"])
-        coverage = st.slider("Demand shifted by storage [%]", 1.0, 100.0, 30.0)
-        tmax = st.number_input("Maximum temperature [°C]", value=90.0)
-        tmin = st.number_input("Minimum temperature [°C]", value=15.0)
-        efficiency = st.slider("Storage efficiency", .5, 1.0, .8)
+        coverage = st.slider("Annual demand allocated to storage [%]", 1.0, 100.0, 30.0,
+                             disabled=storage_volume_mode != "Calculate from demand")
+        tmax = st.number_input("Static capacity: hot reference [°C]", value=90.0)
+        tmin = st.number_input("Static capacity: cold reference [°C]", value=15.0)
+        efficiency = st.slider("Static usable-capacity factor (not simulated losses)", .5, 1.0, .8)
+        st.caption("This factor is used only for static sizing/capacity. The thermal simulation calculates boundary losses separately and does not multiply by this factor.")
         reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
-    with st.expander("3 · Charging and discharging"):
-        operating_mode = st.selectbox("Operating mode", ["Charging", "Discharging", "Idle"])
-        power = st.number_input("Charge/discharge power [kW]", 1.0, value=3300.0)
-        delta_t = st.number_input("Design ΔT [K]", 1.0, value=30.0)
+    with st.expander("3 · Connection-pipe design point"):
+        st.caption("One hydraulic operating point for DN and pressure-loss screening. This is NOT a charging schedule. Run hourly operation in Step 2 of the main page.")
+        operating_mode = st.selectbox("Hydraulic screening mode", ["Charging", "Discharging", "Idle"])
+        power = st.number_input("Pipe-design heat transfer [kW]", 1.0, value=3300.0)
+        delta_t = st.number_input("Pipe supply–return design ΔT [K]", 1.0, value=30.0)
         branch_dn_options = [50, 65, 80, 100, 125, 150, 200, 250, 300]
         minimum_branch_dn = st.selectbox("Minimum PTES branch DN", branch_dn_options,
                                          index=branch_dn_options.index(150))
@@ -422,7 +428,8 @@ with st.expander("Open dimensioned 2D drawings, interactive 3D and material quan
     components.html(design_document, height=950, scrolling=True)
 st.download_button("Download linked 2D/3D design HTML", design_document,
                    "ptes_linked_design.html", "text/html")
-st.info("Preliminary design: GIS embankment and working-space offsets are screening buffers, not designed earthworks. Groundwater observations do not establish the groundwater level at the pit. Thermal stratification / TRNSYS-style simulation is a later stage.")
+st.info("Preliminary design: GIS embankment and working-space offsets are screening buffers, not designed earthworks. Groundwater observations do not establish the groundwater level at the pit. The thermal model below is preliminary and uncalibrated, not a TRNSYS-equivalent validated simulation.")
+render_thermal(design_model, power, delta_t)
 
 if uploaded is None:
     st.info("The geometry designer is ready. Upload nPro GeoJSON in section 1 to continue with candidate locations, routes and GIS checks.")
