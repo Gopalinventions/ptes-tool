@@ -3,6 +3,8 @@ import folium
 import geopandas as gpd
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
+from designer_integration import design_geometry, designer_html
 from folium.features import GeoJsonPopup
 from folium.plugins import Draw
 from shapely.affinity import rotate, translate
@@ -13,7 +15,7 @@ from calculations import (assess_main_pipe, darcy_weisbach_pressure_loss,
                           engineering_suitability_score,
                           geodetic_pressure_correction, required_flow,
                           size_connection_pipe, size_storage_from_demand,
-                          storage_capacity, suitability_score, truncated_pit_geometry)
+                          storage_capacity, suitability_score)
 from gis_analysis import clean_geometry, local_metric_crs, nearby_demand, nearest_pipe_connection, split_layers
 from spatial_analysis import (containing_parcel_measurements,
                               intersecting_feature_count,
@@ -311,19 +313,21 @@ with st.sidebar:
         st.caption("Buildings and existing district-heating pipes are read from this file.")
         hub_selector_placeholder = st.empty()
     with st.expander("2 · Demand and storage sizing", expanded=True):
+        storage_volume_mode = st.selectbox("Storage-volume method", ["Use available volume", "Calculate from demand"])
+        available_storage_volume = st.number_input(
+            "Target water volume [m³]", 1.0, value=125000.0,
+            disabled=storage_volume_mode != "Use available volume",
+        )
+        depth = st.number_input("Total pit depth, including freeboard [m]", 1.0, value=15.0)
+    with st.expander("2b · Demand and temperature settings", expanded=storage_volume_mode == "Calculate from demand"):
         annual_demand = st.number_input("Annual system heat demand [MWh/year]", 1.0, value=20000.0)
         storage_type = st.selectbox("Storage type", ["Seasonal", "Weekly", "Daily"])
         coverage = st.slider("Demand shifted by storage [%]", 1.0, 100.0, 30.0)
-        storage_volume_mode = st.selectbox("Storage-volume method", ["Calculate from demand", "Use available volume"])
-        available_storage_volume = st.number_input(
-            "Available PTES volume [m³]", 1.0, value=50000.0,
-            disabled=storage_volume_mode != "Use available volume",
-        )
         tmax = st.number_input("Maximum temperature [°C]", value=90.0)
         tmin = st.number_input("Minimum temperature [°C]", value=15.0)
         efficiency = st.slider("Storage efficiency", .5, 1.0, .8)
         reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
-    with st.expander("3 · Charging and discharging", expanded=True):
+    with st.expander("3 · Charging and discharging"):
         operating_mode = st.selectbox("Operating mode", ["Charging", "Discharging", "Idle"])
         power = st.number_input("Charge/discharge power [kW]", 1.0, value=3300.0)
         delta_t = st.number_input("Design ΔT [K]", 1.0, value=30.0)
@@ -346,16 +350,17 @@ with st.sidebar:
         dhw_share = st.number_input("Domestic-hot-water share [%]", 0.0, 99.0, value=12.0)
         heating_limit = st.number_input("Heating-limit temperature [°C]", value=15.0)
     with st.expander("6 · Advanced geometry and pressure"):
-        depth = st.number_input("Usable pit depth [m]", 1.0, value=15.0)
-        side_slope = st.number_input("Side slope H:V", .1, value=2.0)
-        aspect_ratio = st.number_input("Length-to-width ratio", .2, value=1.0)
+        freeboard = st.number_input("Freeboard below rim [m]", 0.0, value=2.5)
+        side_slope = st.number_input("Side slope H:V", 0.0, value=1.5)
+        aspect_ratio = st.number_input("Bottom length-to-width ratio", .2, value=1.16)
+        st.caption("Illustrative design values. Water depth = total depth − freeboard. Slopes require geotechnical verification.")
         rotation = st.number_input("Footprint rotation [degrees]", value=0.0)
         elevation_offset = st.number_input("Candidate elevation above nearest pipe [m]", value=0.0)
         embankment_width = st.number_input("Embankment boundary offset [m]", 0.0, value=15.0)
         construction_clearance = st.number_input("Construction working clearance [m]", 0.0, value=20.0)
         parcel_radius = st.number_input("Nearby GIS investigation radius [m]", 100.0, value=1000.0,
                                         help="Only nearby parcel and context features are drawn on the map.")
-    with st.expander("7 · Suitability percentage", expanded=True):
+    with st.expander("7 · Suitability percentage"):
         selected_scoring_criteria = st.multiselect(
             "Criteria included in percentage",
             SCORING_CRITERIA,
@@ -367,6 +372,13 @@ with st.sidebar:
             "Unselected criteria are excluded, not scored as zero. Selected base weights are "
             "re-normalised so their applied weights total 100%."
         )
+    with st.expander("8 · Optional material quantities"):
+        st.caption("Editable examples only. Enter supplier specifications before using quantities for construction LCA.")
+        liner_thickness = st.number_input("Liner thickness [mm]", .1, value=2.0)
+        liner_density = st.number_input("Liner density [kg/m³]", 1.0, value=940.0)
+        liner_allowance = st.number_input("Liner overlaps / waste [%]", 0.0, value=5.0)
+        cover_thickness = st.number_input("Cover insulation thickness [mm]", .1, value=240.0)
+        cover_density = st.number_input("Cover insulation density [kg/m³]", 1.0, value=30.0)
 
 st.sidebar.markdown(
     """
@@ -385,8 +397,35 @@ st.sidebar.markdown(
     unsafe_allow_html=True,
 )
 
+try:
+    if storage_volume_mode == "Calculate from demand":
+        storage = size_storage_from_demand(annual_demand, coverage, storage_type, tmax, tmin, efficiency)
+    else:
+        capacity = storage_capacity(available_storage_volume, tmax, tmin, efficiency)
+        cycles = {"Seasonal": 1, "Weekly": 52, "Daily": 365}[storage_type]
+        storage = dict(volume_m3=available_storage_volume,
+                       energy_per_cycle_mwh=capacity["useful_capacity_mwh"],
+                       annual_shifted_mwh=capacity["useful_capacity_mwh"]*cycles,
+                       cycles_per_year=cycles, delta_t_k=capacity["delta_t_k"])
+    design_inputs, design_model, geometry = design_geometry(
+        storage["volume_m3"], depth, side_slope, freeboard, aspect_ratio,
+        linerThickness=liner_thickness, linerDensity=liner_density,
+        allowance=liner_allowance, coverThickness=cover_thickness, coverDensity=cover_density)
+    design_document = designer_html(design_inputs, design_model)
+except (ValueError, OSError) as exc:
+    st.error(f"Design could not be prepared: {exc}")
+    st.stop()
+
+st.subheader("Step 1 · Storage geometry and engineering drawings")
+st.caption("The 2D/3D drawings and GIS rim footprint share the same geometry. Drawings use local coordinates, not surveyed elevations. GIS rotation positions the footprint on the map; the drawing remains aligned with its own axes.")
+with st.expander("Open dimensioned 2D drawings, interactive 3D and material quantities", expanded=True):
+    components.html(design_document, height=950, scrolling=True)
+st.download_button("Download linked 2D/3D design HTML", design_document,
+                   "ptes_linked_design.html", "text/html")
+st.info("Preliminary design: GIS embankment and working-space offsets are screening buffers, not designed earthworks. Groundwater observations do not establish the groundwater level at the pit. Thermal stratification / TRNSYS-style simulation is a later stage.")
+
 if uploaded is None:
-    st.info("Upload an nPro GeoJSON file to start.")
+    st.info("The geometry designer is ready. Upload nPro GeoJSON in section 1 to continue with candidate locations, routes and GIS checks.")
     st.stop()
 
 try:
@@ -592,19 +631,7 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     try:
         if not selected_scoring_criteria:
             raise ValueError("Select at least one criterion for the suitability percentage.")
-        if storage_volume_mode == "Calculate from demand":
-            storage = size_storage_from_demand(annual_demand, coverage, storage_type, tmax, tmin, efficiency)
-        else:
-            capacity = storage_capacity(available_storage_volume, tmax, tmin, efficiency)
-            cycles = {"Seasonal": 1, "Weekly": 52, "Daily": 365}[storage_type]
-            storage = {
-                "volume_m3": available_storage_volume,
-                "energy_per_cycle_mwh": capacity["useful_capacity_mwh"],
-                "annual_shifted_mwh": capacity["useful_capacity_mwh"] * cycles,
-                "cycles_per_year": cycles,
-                "delta_t_k": capacity["delta_t_k"],
-            }
-        geometry = truncated_pit_geometry(storage["volume_m3"], depth, side_slope, aspect_ratio)
+        # Reuse the exact model already shown in the drawing studio above.
         flow = required_flow(power, delta_t)
         _, dn, diameter, velocity = size_connection_pipe(
             flow["volume_flow_m3_s"], min_dn=minimum_branch_dn, max_dn=maximum_branch_dn
@@ -693,6 +720,11 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                    "Hub-to-storage distance [m]": hub_to_storage_distance,
                    "Connection [m]": distance, "Demand 500 m [MWh/year]": demand500,
                    "Storage volume [m³]": storage["volume_m3"], "Energy/cycle [MWh]": storage["energy_per_cycle_mwh"],
+                   "Total pit depth [m]": depth, "Water depth [m]": design_model["h"],
+                   "Freeboard [m]": freeboard,
+                   "Ideal pit geometry volume [m³]": design_model["pitVolume"],
+                   "Liner geometric area [m²]": design_model["linerArea"],
+                   "Cover area [m²]": design_model["coverArea"],
                    "PTES excavation footprint [m²]": excavation.area,
                    "Land take incl. embankment [m²]": embankment.area,
                    "Total construction site needed [m²]": construction.area,
