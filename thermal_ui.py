@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 from dataclasses import replace
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -24,8 +25,13 @@ def read_profile(frame):
 
 
 def render_thermal(g, hydraulic_power, hydraulic_dt):
-    st.subheader('Step 2 · Thermal stratification')
-    st.caption('Uses the geometry above automatically. No second volume or depth entry. Simulation is independent of annual-demand sizing and the static utilisation factor.')
+    st.subheader('Step 3 · PTES thermal stratification and animated output')
+    st.caption('Uses the Step 2 geometry automatically. No second volume or depth entry. After a run, the output shows an animated 2D temperature section and 3D cutaway with the calculated layer temperatures.')
+    preview_path = Path(__file__).with_name('ptes_stratification_example.html')
+    if preview_path.exists():
+        with st.expander('Preview the stratified-storage output format', expanded=False):
+            st.warning('This preview is a prescribed visual example only. Its dimensions and temperatures are not the current selected storage and are not simulation results.')
+            components.html(preview_path.read_text(encoding='utf-8'), height=850, scrolling=True)
     with st.expander('Thermal simulation · conditions and hourly schedule',expanded=False):
         st.warning('Preliminary uncalibrated model. Defaults below are editable examples, not measured Mühlhausen inputs. No heat pump, transient soil domain, inlet jet or heat-exchanger losses are modelled.')
         c1,c2=st.columns(2)
