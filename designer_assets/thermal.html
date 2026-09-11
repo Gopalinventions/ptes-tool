@@ -1,0 +1,28 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PTES thermal stratification</title><style>
+*{box-sizing:border-box}body{font:15px system-ui;margin:0;padding:20px;color:#dfeaf4;background:#14232f}h2{margin-top:0}button{padding:8px 15px;border:0;border-radius:5px;background:#2ca3bd;color:white;cursor:pointer}input{width:100%}.controls{display:flex;gap:15px;align-items:center}.controls input{flex:1}.cards{display:flex;gap:20px;flex-wrap:wrap;margin:15px 0}.cards strong{display:block;font-size:22px}.views{display:grid;grid-template-columns:1fr 1fr;gap:12px}canvas{width:100%;background:#1c303e;border-radius:8px}.legend{height:14px;background:linear-gradient(90deg,hsl(240 80% 52%),hsl(180 80% 52%),hsl(120 80% 52%),hsl(60 80% 52%),hsl(0 80% 52%));margin-top:15px}.ticks{display:flex;justify-content:space-between}.note{color:#b0c6d4;font-size:13px;line-height:1.5}@media(max-width:650px){.views{grid-template-columns:1fr}}
+</style><h2>PTES · temperature stratification over time</h2>
+<p id="source" class="note"></p><div class="controls"><button id="play">Play</button><input id="time" aria-label="Elapsed hour" type="range" min="0" value="0" step="1"><output id="hour"></output></div>
+<div class="cards"><div>Top layer<strong id="top"></strong></div><div>Bottom layer<strong id="bottom"></strong></div><div>Energy above return temperature<strong id="energy"></strong></div></div>
+<div class="views"><div><h3>Length section · true proportions</h3><canvas id="section" width="720" height="440" aria-label="Temperature coloured longitudinal section"></canvas></div><div><h3>3D cutaway · half removed to expose layers</h3><canvas id="three" width="720" height="440" aria-label="Temperature coloured three dimensional pit cutaway"></canvas></div></div>
+<div class="legend"></div><div class="ticks"><span>5 °C</span><span>27.5 °C</span><span>50 °C</span><span>72.5 °C</span><span>95 °C</span></div>
+<p class="note">Colours show calculated layer temperatures, not decorative material colours. Geometry comes from the same storage design. This is a 1-D layered calculation displayed in 3D, not CFD. Soil, cover construction and pipe jets are not rendered. Energy above return temperature is not a guarantee of directly deliverable network heat.</p>
+<script>
+const D=__THERMAL_DATA__,G=D.geometry,$=id=>document.getElementById(id);
+$('time').max=D.history.length-1;$('source').textContent=D.label;
+const colour=t=>`hsl(${240*(1-Math.max(0,Math.min(1,(t-5)/90)))} 80% 52%)`;
+function polygon(ctx,pts,fill){ctx.beginPath();pts.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.fillStyle=fill;ctx.fill();ctx.strokeStyle='#203440';ctx.lineWidth=.6;ctx.stroke();}
+function render(){const r=D.history[+$('time').value];$('hour').textContent=`Hour ${r.hour}`;$('top').textContent=r.top_c.toFixed(1)+' °C';$('bottom').textContent=r.bottom_c.toFixed(1)+' °C';$('energy').textContent=r.energy_above_return_mwh.toFixed(1)+' MWh';
+ const c=$('section').getContext('2d');c.clearRect(0,0,720,440);const k=Math.min(620/G.L,280/G.H),base=285;
+ D.layers.forEach((layer,i)=>{const a=layer.z_bottom_m,b=layer.z_top_m,L0=G.l+2*G.s*a,L1=G.l+2*G.s*b;polygon(c,[[360-L0*k/2,base-a*k],[360+L0*k/2,base-a*k],[360+L1*k/2,base-b*k],[360-L1*k/2,base-b*k]],colour(r.temperatures_c[i]));});
+ c.strokeStyle='#dae8ee';c.lineWidth=2;c.beginPath();c.moveTo(360-G.L*k/2,base-G.H*k);c.lineTo(360-G.l*k/2,base);c.lineTo(360+G.l*k/2,base);c.lineTo(360+G.L*k/2,base-G.H*k);c.stroke();c.fillStyle='#e4edf4';c.font='16px system-ui';c.textAlign='center';c.fillText(`Rim ${G.L.toFixed(2)} m · water depth ${G.h.toFixed(2)} m`,360,350);c.fillText(`Total depth ${G.H.toFixed(2)} m · freeboard ${G.f.toFixed(2)} m`,360,378);
+ const ctx=$('three').getContext('2d');ctx.clearRect(0,0,720,440);const scale=Math.min(610/(G.L+.65*G.B),250/(.23*G.L+.40*G.B+G.H));
+ const p=(x,y,z)=>[360+(x-.65*y)*scale,200+(.23*x+.40*y-z+G.h/2)*scale];
+ D.layers.forEach((layer,i)=>{const z0=layer.z_bottom_m,z1=layer.z_top_m,l0=(G.l+2*G.s*z0)/2,b0=(G.b+2*G.s*z0)/2,l1=(G.l+2*G.s*z1)/2,b1=(G.b+2*G.s*z1)/2;
+ polygon(ctx,[p(l0,-b0,z0),p(l0,0,z0),p(l1,0,z1),p(l1,-b1,z1)],colour(r.temperatures_c[i]));
+ polygon(ctx,[p(-l0,0,z0),p(l0,0,z0),p(l1,0,z1),p(-l1,0,z1)],colour(r.temperatures_c[i]));
+ });
+ polygon(ctx,[p(-G.wl/2,-G.wb/2,G.h),p(G.wl/2,-G.wb/2,G.h),p(G.wl/2,0,G.h),p(-G.wl/2,0,G.h)],colour(r.top_c));ctx.fillStyle='#e4edf4';ctx.font='16px system-ui';ctx.textAlign='center';ctx.fillText(`${G.waterVolume.toLocaleString('en-GB',{maximumFractionDigits:0})} m³ full volume · ${D.layers.length} layers`,360,378);
+}
+let timer=null;$('play').onclick=()=>{if(timer){clearInterval(timer);timer=null;$('play').textContent='Play';return;}if(+$('time').value>=D.history.length-1)$('time').value=0;$('play').textContent='Pause';timer=setInterval(()=>{const next=Math.min(D.history.length-1,+$('time').value+Math.max(1,Math.ceil(D.history.length/500)));$('time').value=next;render();if(next===D.history.length-1){clearInterval(timer);timer=null;$('play').textContent='Play';}},100);};$('time').oninput=render;render();
+</script></html>
