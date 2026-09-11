@@ -8,7 +8,8 @@ def design_geometry(target, depth, slope, freeboard, ratio, **materials):
     p = dict(mode="volume", target=target, depth=depth, slope=slope,
              freeboard=freeboard, ratio=ratio, length=132, width=120,
              linerThickness=2., linerDensity=940., allowance=5.,
-             coverThickness=240., coverDensity=30.)
+             coverThickness=240., coverDensity=30.,
+             permanentPerimeter=5., temporaryWorking=8.)
     p.update(materials)
     for key, value in p.items():
         if key == "mode":

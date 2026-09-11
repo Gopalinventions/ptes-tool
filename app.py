@@ -429,14 +429,15 @@ try:
     design_inputs, design_model, geometry = design_geometry(
         storage["volume_m3"], depth, side_slope, freeboard, aspect_ratio,
         linerThickness=liner_thickness, linerDensity=liner_density,
-        allowance=liner_allowance, coverThickness=cover_thickness, coverDensity=cover_density)
+        allowance=liner_allowance, coverThickness=cover_thickness, coverDensity=cover_density,
+        permanentPerimeter=embankment_width, temporaryWorking=construction_clearance)
     design_document = designer_html(design_inputs, design_model)
 except (ValueError, OSError) as exc:
     st.error(f"Design could not be prepared: {exc}")
     st.stop()
 
 st.subheader("Step 1 · Storage geometry and engineering drawings")
-st.caption("The 2D/3D drawings and GIS rim footprint share the same geometry. Drawings use local coordinates, not surveyed elevations. GIS rotation positions the footprint on the map; the drawing remains aligned with its own axes.")
+st.caption("The 2D/3D drawings and GIS rim footprint share the same geometry. The plan sheet also shows the editable permanent perimeter and temporary working envelope. Drawings use local coordinates, not surveyed elevations.")
 with st.expander("Open dimensioned 2D drawings, interactive 3D and material quantities", expanded=True):
     components.html(design_document, height=950, scrolling=True)
 st.download_button("Download linked 2D/3D design HTML", design_document,
@@ -674,8 +675,10 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
             excavation = translate(rotate(box(-geometry["top_length_m"]/2, -geometry["top_width_m"]/2,
                                                    geometry["top_length_m"]/2, geometry["top_width_m"]/2),
                                            rotation, origin=(0, 0)), pt.x, pt.y)
-            embankment = excavation.buffer(embankment_width)
-            construction = embankment.buffer(construction_clearance)
+            # Square-corner envelopes make plan dimensions explicit. They are planning
+            # envelopes, not a designed embankment cross-section or haul-road layout.
+            embankment = excavation.buffer(embankment_width, join_style=2)
+            construction = embankment.buffer(construction_clearance, join_style=2)
             parcel = containing_parcel_measurements(construction, optional_layers["Candidate parcels"])
             saved = st.session_state.candidates[candidate["Candidate"]]
             if saved.get("route"):
@@ -746,11 +749,17 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                    "Liner geometric area [m²]": design_model["linerArea"],
                    "Cover area [m²]": design_model["coverArea"],
                    "PTES excavation footprint [m²]": excavation.area,
-                   "Land take incl. embankment [m²]": embankment.area,
-                   "Total construction site needed [m²]": construction.area,
-                   "Construction/access allowance [m²]": construction.area - embankment.area,
+                   "Permanent perimeter / embankment [m²]": embankment.area,
+                   "Temporary construction envelope [m²]": construction.area,
+                   "Temporary working area only [m²]": construction.area - embankment.area,
+                   "Permanent perimeter allowance [m]": embankment_width,
+                   "Temporary working clearance [m]": construction_clearance,
                    "Excavation top length [m]": geometry["top_length_m"],
                    "Excavation top width [m]": geometry["top_width_m"],
+                   "Permanent envelope length [m]": geometry["top_length_m"] + 2 * embankment_width,
+                   "Permanent envelope width [m]": geometry["top_width_m"] + 2 * embankment_width,
+                   "Construction envelope length [m]": geometry["top_length_m"] + 2 * (embankment_width + construction_clearance),
+                   "Construction envelope width [m]": geometry["top_width_m"] + 2 * (embankment_width + construction_clearance),
                    "Assessed parcel area [m²]": parcel["parcel_area_m2"],
                    "Construction outside parcel [m²]": parcel["footprint_outside_m2"],
                    "Flood-zone overlap [m²]": flood_overlap,
@@ -781,8 +790,8 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
                                         geometry=[shape], crs=metric_crs).to_crs(4326)
             map_items.append((row, connection.to_crs(4326),
                               boundary_layer("Excavation", excavation),
-                              boundary_layer("Embankment", embankment),
-                              boundary_layer("Construction/access", construction)))
+                              boundary_layer("Permanent perimeter / embankment", embankment),
+                              boundary_layer("Temporary construction envelope", construction)))
     except Exception as exc:
         st.error(f"Analysis failed: {exc}")
         st.stop()
@@ -822,12 +831,15 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
             st.write(f"{result['Branch sizing status']} · {result['Capacity status']}")
             st.markdown("**4. Land, construction and constraints**")
             land_table = pd.DataFrame({
-                "Result": ["Excavation footprint", "Land incl. embankment", "Total construction site",
+                "Result": ["Excavation rim footprint", "Permanent perimeter / embankment", "Temporary construction envelope",
+                           "Permanent envelope dimensions", "Construction-envelope dimensions",
                            "Outside parcel", "Flood overlap", "Protected-area overlap",
                            "Utility crossings", "Nearest groundwater observation"],
                 "Value": [f"{result['PTES excavation footprint [m²]']:.0f} m²",
-                          f"{result['Land take incl. embankment [m²]']:.0f} m²",
-                          f"{result['Total construction site needed [m²]']:.0f} m²",
+                          f"{result['Permanent perimeter / embankment [m²]']:.0f} m² ({result['Permanent perimeter allowance [m]']:.1f} m allowance)",
+                          f"{result['Temporary construction envelope [m²]']:.0f} m² ({result['Temporary working clearance [m]']:.1f} m working clearance)",
+                          f"{result['Permanent envelope length [m]']:.1f} × {result['Permanent envelope width [m]']:.1f} m",
+                          f"{result['Construction envelope length [m]']:.1f} × {result['Construction envelope width [m]']:.1f} m",
                           "Not assessed" if pd.isna(result['Construction outside parcel [m²]']) else f"{result['Construction outside parcel [m²]']:.0f} m²",
                           "Not assessed" if pd.isna(result['Flood-zone overlap [m²]']) else f"{result['Flood-zone overlap [m²]']:.0f} m²",
                           "Not assessed" if pd.isna(result['Protected-area overlap [m²]']) else f"{result['Protected-area overlap [m²]']:.0f} m²",
@@ -854,10 +866,10 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     add_optional_layers(result_map, map_context_layers)
     for result, connection, excavation, embankment, construction in map_items:
         name, color = result["Candidate"], COLORS[result["Candidate"]]
-        folium.GeoJson(construction, name=f"{name} construction/access boundary",
+        folium.GeoJson(construction, name=f"{name} temporary construction envelope",
                        style_function=lambda _: {"color": "#555", "weight": 2, "dashArray": "7 5",
                                                  "fillColor": "#999", "fillOpacity": .10}).add_to(result_map)
-        folium.GeoJson(embankment, name=f"{name} embankment boundary",
+        folium.GeoJson(embankment, name=f"{name} permanent perimeter / embankment",
                        style_function=lambda _: {"color": "#B7791F", "weight": 2,
                                                  "fillColor": "#D69E2E", "fillOpacity": .15}).add_to(result_map)
         folium.GeoJson(connection, name=f"{name} connection", style_function=lambda _, col=color: {"color": col, "weight": 6},
@@ -878,8 +890,8 @@ if st.button("Analyse and compare", type="primary", disabled=candidate_table.emp
     Leading candidate: {best['Candidate']}<br>
     Storage volume: {best['Storage volume [m³]']:.0f} m³<br>
     Excavation footprint: {best['PTES excavation footprint [m²]']:.0f} m²<br>
-    Land incl. embankment: {best['Land take incl. embankment [m²]']:.0f} m²<br>
-    Total construction site needed: {best['Total construction site needed [m²]']:.0f} m²<br>
+    Permanent perimeter / embankment: {best['Permanent perimeter / embankment [m²]']:.0f} m²<br>
+    Temporary construction envelope: {best['Temporary construction envelope [m²]']:.0f} m²<br>
     Connection: {best['Connection [m]']:.1f} m · branch DN {best['Branch DN']}<br>
     Score criteria used: {len(selected_scoring_criteria)} of {len(SCORING_CRITERIA)}<br>
     <span style='font-size:10px'>{' · '.join(selected_scoring_criteria)}</span><br>
