@@ -333,7 +333,7 @@ with st.sidebar:
         st.caption("This factor is used only for static sizing/capacity. The thermal simulation calculates boundary losses separately and does not multiply by this factor.")
         reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
     with st.expander("3 · Connection-pipe design point"):
-        st.caption("One hydraulic operating point for DN and pressure-loss screening. This is NOT a charging schedule. Run hourly operation in Step 2 of the main page.")
+        st.caption("One hydraulic operating point for DN and pressure-loss screening. This is NOT a charging schedule. Run hourly operation in Step 3 of the main page.")
         operating_mode = st.selectbox("Hydraulic screening mode", ["Charging", "Discharging", "Idle"])
         power = st.number_input("Pipe-design heat transfer [kW]", 1.0, value=3300.0)
         delta_t = st.number_input("Pipe supply–return design ΔT [K]", 1.0, value=30.0)
@@ -436,17 +436,9 @@ except (ValueError, OSError) as exc:
     st.error(f"Design could not be prepared: {exc}")
     st.stop()
 
-st.subheader("Step 1 · Storage geometry and engineering drawings")
-st.caption("The 2D/3D drawings and GIS rim footprint share the same geometry. The plan sheet also shows the editable permanent perimeter and temporary working envelope. Drawings use local coordinates, not surveyed elevations.")
-with st.expander("Open dimensioned 2D drawings, interactive 3D and material quantities", expanded=True):
-    components.html(design_document, height=950, scrolling=True)
-st.download_button("Download linked 2D/3D design HTML", design_document,
-                   "ptes_linked_design.html", "text/html")
-st.info("Preliminary design: GIS embankment and working-space offsets are screening buffers, not designed earthworks. Groundwater observations do not establish the groundwater level at the pit. The thermal model below is preliminary and uncalibrated, not a TRNSYS-equivalent validated simulation.")
-render_thermal(design_model, power, delta_t)
-
 if uploaded is None:
-    st.info("The geometry designer is ready. Upload nPro GeoJSON in section 1 to continue with candidate locations, routes and GIS checks.")
+    st.subheader("Step 1 · nPro network, energy hub and storage candidate")
+    st.info("Upload the nPro GeoJSON in sidebar section 1. Then select the energy hub, place Storage A/B/C and run the nPro/GIS screening. Steps 2 and 3 use the selected storage geometry.")
     st.stop()
 
 try:
@@ -457,6 +449,9 @@ try:
 except Exception as exc:
     st.error(f"Could not prepare GeoJSON: {exc}")
     st.stop()
+
+st.subheader("Step 1 · nPro network, energy hub and storage candidate")
+st.caption("Select an energy-hub building and place Storage A, B or C. The map evaluates the route from energy hub → storage → existing network. Storage dimensions are calculated separately in Step 2; nPro does not provide final civil dimensions.")
 
 optional_files = {
     "Candidate parcels": parcels_file,
@@ -574,7 +569,7 @@ buildings_wgs, pipes_wgs = json_safe(buildings_m.to_crs(4326)), json_safe(pipes_
 b = pipes_wgs.total_bounds
 center = [(b[1] + b[3]) / 2, (b[0] + b[2]) / 2]
 
-st.subheader("Candidate placement")
+st.markdown("**1.1 Candidate placement and energy-hub selection**")
 map_theme = st.selectbox("Colour pipelines by", list(THEMES))
 slot = st.radio("Candidate to place", list(COLORS), horizontal=True)
 interaction_mode = st.radio(
@@ -648,7 +643,19 @@ candidate_table = pd.DataFrame([{"Candidate": n, "Latitude": v["lat"], "Longitud
 if not candidate_table.empty:
     st.dataframe(candidate_table, hide_index=True, use_container_width=True)
 
-if st.button("Analyse and compare", type="primary", disabled=candidate_table.empty):
+analysis_requested = st.button("Analyse nPro candidates", type="primary", disabled=candidate_table.empty)
+
+st.subheader("Step 2 · PTES geometry — dimensioned 2D and 3D design")
+st.caption("The same storage volume, depth, slope, freeboard, permanent perimeter and temporary working envelope are used in the drawing and in the GIS boundary calculation.")
+with st.expander("Open dimensioned 2D section, plan, 3D model and quantities", expanded=True):
+    components.html(design_document, height=950, scrolling=True)
+st.download_button("Download linked 2D/3D design HTML", design_document,
+                   "ptes_linked_design.html", "text/html")
+st.info("Preliminary design only: the 2D plan envelopes and 3D pit do not establish final embankment, access-road, drainage or slope-stability design. Confirm these with survey and geotechnical inputs.")
+
+render_thermal(design_model, power, delta_t)
+
+if analysis_requested:
     try:
         if not selected_scoring_criteria:
             raise ValueError("Select at least one criterion for the suitability percentage.")
