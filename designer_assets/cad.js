@@ -9,16 +9,16 @@ function base(title,id){return `<defs><marker id="arr" viewBox="0 0 10 10" refX=
 function scale(x,y,k,g){const length=Math.max(1,Math.round(g.L/5/5)*5);return ln(x,y,x+length*k,y)+ln(x,y-5,x,y+5)+ln(x+length*k,y-5,x+length*k,y+5)+tx(x,y+22,'0')+tx(x+length*k-25,y+22,length+' m');}
 function render(g,p,kind){let s='';
 if(kind==='plan'){
- s=base('GENERAL ARRANGEMENT / PLAN','PTES-GA-001');const k=Math.min(570/g.L,440/g.B),cx=410,cy=370;
+ s=base('GENERAL ARRANGEMENT / PLAN','PTES-GA-001');const perm=Number(p.permanentPerimeter||0),work=Number(p.temporaryWorking||0),outer=perm+work,planL=g.L+2*outer,planB=g.B+2*outer,k=Math.min(570/planL,440/planB),cx=410,cy=370;
  const rect=(L,B,cl)=>`<rect x="${cx-L*k/2}" y="${cy-B*k/2}" width="${L*k}" height="${B*k}" class="${cl}"/>`;
- s+=rect(g.L,g.B,'')+rect(g.l,g.b,'bottom')+rect(g.wl,g.wb,'water');
+ s+=rect(planL,planB,'thin')+rect(g.L+2*perm,g.B+2*perm,'thin')+rect(g.L,g.B,'')+rect(g.l,g.b,'bottom')+rect(g.wl,g.wb,'water');
  s+=ln(cx-g.L*k/2-35,cy,cx+g.L*k/2+35,cy,'axis')+tx(cx-g.L*k/2-48,cy-10,'A')+tx(cx+g.L*k/2+38,cy-10,'A');
  s+=ln(cx,cy-g.B*k/2-25,cx,cy+g.B*k/2+25,'axis')+tx(cx+24,cy-g.B*k/2-12,'B')+tx(cx+24,cy+g.B*k/2+22,'B');
  s+=dh(cx-g.L*k/2,cx+g.L*k/2,115,cy-g.B*k/2,n(g.L)+' overall');
  s+=dh(cx-g.l*k/2,cx+g.l*k/2,635,cy+g.b*k/2,n(g.l)+' bottom');
  s+=dv(cy-g.B*k/2,cy+g.B*k/2,70,cx-g.L*k/2,n(g.B)+' overall');
- s+=tx(800,160,'GEOMETRY REGISTER',17)+tx(800,198,'Water volume: '+n(g.waterVolume)+' m³')+tx(800,228,'Water depth: '+n(g.h)+' m')+tx(800,258,'Freeboard: '+n(g.f)+' m')+tx(800,288,'Bottom: '+n(g.l)+' × '+n(g.b)+' m')+tx(800,318,'Water: '+n(g.wl)+' × '+n(g.wb)+' m')+tx(800,365,'LINE CONVENTIONS',17)+ln(800,395,850,395)+tx(862,400,'Rim')+ln(800,425,850,425,'water')+tx(862,430,'Water / cover footprint')+ln(800,455,850,455,'bottom')+tx(862,460,'Bottom outline');
- s+=tx(800,515,'External embankment, anchor trench,')+tx(800,540,'access and setbacks: not defined.')+tx(800,565,'No site boundary or north assumed.');s+=scale(110,675,k,g);
+ s+=tx(800,160,'GEOMETRY REGISTER',17)+tx(800,198,'Water volume: '+n(g.waterVolume)+' m³')+tx(800,228,'Water depth: '+n(g.h)+' m')+tx(800,258,'Freeboard: '+n(g.f)+' m')+tx(800,288,'Bottom: '+n(g.l)+' × '+n(g.b)+' m')+tx(800,318,'Water: '+n(g.wl)+' × '+n(g.wb)+' m')+tx(800,365,'PLAN ENVELOPES',17)+ln(800,395,850,395,'thin')+tx(862,400,'Temporary construction')+ln(800,425,850,425,'thin')+tx(862,430,'Permanent perimeter')+ln(800,455,850,455)+tx(862,460,'Excavation rim');
+ s+=tx(800,515,'Permanent perimeter: '+n(perm)+' m')+tx(800,540,'Temporary working: '+n(work)+' m')+tx(800,565,'Envelopes are planning geometry,')+tx(800,590,'not final embankment design.');s+=scale(110,675,k,g);
 }else if(kind==='sections'){
  s=base('SECTIONS A–A / B–B','PTES-SE-002');
  for(const [i,name,L,b]of [[0,'A–A longitudinal',g.L,g.l],[1,'B–B transverse',g.B,g.b]]){
