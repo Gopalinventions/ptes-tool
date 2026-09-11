@@ -362,8 +362,21 @@ with st.sidebar:
         st.caption("Illustrative design values. Water depth = total depth − freeboard. Slopes require geotechnical verification.")
         rotation = st.number_input("Footprint rotation [degrees]", value=0.0)
         elevation_offset = st.number_input("Candidate elevation above nearest pipe [m]", value=0.0)
-        embankment_width = st.number_input("Embankment boundary offset [m]", 0.0, value=15.0)
-        construction_clearance = st.number_input("Construction working clearance [m]", 0.0, value=20.0)
+        embankment_width = st.number_input(
+            "Permanent perimeter / embankment allowance [m]", 0.0, value=5.0,
+            help=("Initial planning allowance outside the excavated rim for the cover edge, "
+                  "anchor trench, drainage detail and embankment crest. It is not a slope-stability design."),
+        )
+        construction_clearance = st.number_input(
+            "Temporary construction working clearance [m]", 0.0, value=8.0,
+            help=("Initial planning corridor outside the permanent perimeter for access, liner installation "
+                  "and construction plant. Confirm it with the construction method and site logistics plan."),
+        )
+        st.caption(
+            "Compact preliminary layout: 5 m permanent perimeter + 8 m temporary working corridor. "
+            "The former 15 m + 20 m screening buffers were intentionally conservative. Increase these "
+            "values where geotechnics, haul roads, cranes, drainage or temporary soil stockpiles require it."
+        )
         parcel_radius = st.number_input("Nearby GIS investigation radius [m]", 100.0, value=1000.0,
                                         help="Only nearby parcel and context features are drawn on the map.")
     with st.expander("7 · Suitability percentage"):
