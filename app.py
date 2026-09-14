@@ -5,6 +5,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from designer_integration import design_geometry, designer_html
+from energy_balance import EnergySystemInputs, simulate_monthly_balance
 from thermal_ui import render_thermal
 from folium.features import GeoJsonPopup
 from folium.plugins import Draw
@@ -332,6 +333,27 @@ with st.sidebar:
         efficiency = st.slider("Static usable-capacity factor (not simulated losses)", .5, 1.0, .8)
         st.caption("This factor is used only for static sizing/capacity. The thermal simulation calculates boundary losses separately and does not multiply by this factor.")
         reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
+    with st.expander("2c · Interlinked energy-system planning", expanded=True):
+        st.caption("Reusable preliminary monthly planning model. Change source capacities, operating hours or PTES volume to update the shared charging/discharging balance.")
+        solar_thermal_kw = st.number_input("Solar thermal nominal capacity [kWth]", 0.0, value=3300.0)
+        solar_specific_yield = st.number_input(
+            "Solar net specific yield [kWhth/kWth/year]", 0.0, value=1030.0,
+            help="Enter a site-specific annual net yield from your solar model. The default is only a WÜST planning-screen value.",
+        )
+        bhkw_electrical_kw = st.number_input("BHKW electrical capacity combined [kWe]", 0.0, value=1950.0,
+                                              help="Used in the future electricity-market dispatch layer.")
+        bhkw_thermal_kw = st.number_input("BHKW thermal capacity combined [kWth]", 0.0, value=2390.0)
+        bhkw_summer_hours = st.number_input("BHKW selected summer operating hours [h/year]", 0.0, value=0.0,
+                                             help="Use price-selected operating hours from the day-ahead BHKW screen, or enter a planning case.")
+        heat_pump_thermal_kw = st.number_input("Heat-pump thermal capacity combined [kWth]", 0.0, value=0.0)
+        heat_pump_summer_hours = st.number_input("Heat-pump summer operating hours [h/year]", 0.0, value=0.0)
+        heat_pump_cop = st.number_input("Heat-pump seasonal COP", min_value=0.1, value=3.0)
+        waste_heat_kw = st.number_input("Waste-heat available capacity [kWth]", 0.0, value=0.0)
+        waste_heat_summer_hours = st.number_input("Waste-heat summer availability [h/year]", 0.0, value=0.0)
+        monthly_storage_loss = st.number_input(
+            "PTES monthly standing loss [%]", min_value=0.0, max_value=99.0, value=0.0,
+            help="Keep at 0 until cover, liner, sidewall and ground-loss results are verified in the thermal model.",
+        )
     with st.expander("3 · Connection-pipe design point"):
         st.caption("One hydraulic operating point for DN and pressure-loss screening. This is NOT a charging schedule. Run hourly operation in Step 3 of the main page.")
         operating_mode = st.selectbox("Hydraulic screening mode", ["Charging", "Discharging", "Idle"])
@@ -432,9 +454,42 @@ try:
         allowance=liner_allowance, coverThickness=cover_thickness, coverDensity=cover_density,
         permanentPerimeter=embankment_width, temporaryWorking=construction_clearance)
     design_document = designer_html(design_inputs, design_model)
+    energy_inputs = EnergySystemInputs(
+        annual_demand_mwh=annual_demand,
+        storage_volume_m3=storage["volume_m3"], hot_c=tmax, cold_c=tmin,
+        usable_capacity_factor=efficiency,
+        solar_net_annual_mwh=solar_thermal_kw * solar_specific_yield / 1000,
+        bhkw_thermal_kw=bhkw_thermal_kw, bhkw_summer_hours=bhkw_summer_hours,
+        heat_pump_thermal_kw=heat_pump_thermal_kw,
+        heat_pump_summer_hours=heat_pump_summer_hours, heat_pump_cop=heat_pump_cop,
+        waste_heat_kw=waste_heat_kw, waste_heat_summer_hours=waste_heat_summer_hours,
+        monthly_storage_loss_percent=monthly_storage_loss,
+    )
+    energy_balance = simulate_monthly_balance(energy_inputs)
 except (ValueError, OSError) as exc:
     st.error(f"Design could not be prepared: {exc}")
     st.stop()
+
+st.subheader("Step 0 · Interlinked PTES energy-system planning")
+st.caption("This generic planning screen is independent of one project site. It links the selected PTES volume with solar, BHKW, heat-pump, waste-heat and demand inputs. Monthly default profiles are clearly preliminary until you upload hourly profiles.")
+energy_col1, energy_col2, energy_col3, energy_col4 = st.columns(4)
+energy_col1.metric("Selected PTES capacity", f"{energy_balance['capacity_mwh']:,.0f} MWh")
+energy_col2.metric("Maximum PTES state of charge", f"{energy_balance['maximum_soc_mwh']:,.0f} MWh")
+energy_col3.metric("PTES winter discharge", f"{energy_balance['totals']['PTES discharge [MWh]']:,.0f} MWh")
+energy_col4.metric("Remaining boiler heat", f"{energy_balance['totals']['Remaining boiler heat [MWh]']:,.0f} MWh")
+with st.expander("Open linked charging, discharging and source balance", expanded=True):
+    energy_frame = pd.DataFrame(energy_balance["rows"])
+    chart_frame = energy_frame.set_index("Month")[[
+        "Solar [MWh]", "BHKW heat [MWh]", "Heat pump heat [MWh]", "Waste heat [MWh]",
+        "PTES charge [MWh]", "PTES discharge [MWh]", "PTES state of charge [MWh]",
+    ]]
+    st.line_chart(chart_frame, use_container_width=True)
+    st.dataframe(energy_frame.round(1), hide_index=True, use_container_width=True)
+    st.download_button(
+        "Download energy-balance CSV", energy_frame.to_csv(index=False).encode("utf-8"),
+        "ptes_interlinked_energy_balance.csv", "text/csv",
+    )
+    st.info(energy_balance["model_status"])
 
 if uploaded is None:
     st.subheader("Step 1 · nPro network, energy hub and storage candidate")
