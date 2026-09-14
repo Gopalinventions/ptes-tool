@@ -84,6 +84,16 @@ def read_energy_csv(file_bytes: bytes) -> pd.DataFrame:
     return pd.read_csv(io.BytesIO(file_bytes), sep=None, engine="python")
 
 
+@st.cache_data(show_spinner="Reading Excel energy-profile workbook…")
+def excel_sheet_names(file_bytes: bytes) -> list[str]:
+    return pd.ExcelFile(io.BytesIO(file_bytes)).sheet_names
+
+
+@st.cache_data(show_spinner="Reading Excel energy-profile sheet…")
+def read_energy_excel(file_bytes: bytes, sheet_name: str, header_row: int) -> pd.DataFrame:
+    return pd.read_excel(io.BytesIO(file_bytes), sheet_name=sheet_name, header=header_row - 1)
+
+
 def numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
     """Accept decimal commas as well as decimal points in uploaded CSV files."""
     return pd.to_numeric(frame[column].astype(str).str.replace(",", ".", regex=False), errors="coerce")
@@ -352,16 +362,31 @@ with st.sidebar:
             help="Enter a site-specific annual net yield from your solar model. The default is only a WÜST planning-screen value.",
         )
         solar_monthly_profile = None
-        solar_profile_file = st.file_uploader("Optional solar heat-energy profile CSV", type=["csv", "txt"], key="solar_profile")
+        solar_profile_file = st.file_uploader(
+            "Optional solar heat-energy profile (CSV or Excel)", type=["csv", "txt", "xlsx", "xls"], key="solar_profile"
+        )
         if solar_profile_file is not None:
             try:
-                solar_frame = read_energy_csv(solar_profile_file.getvalue())
+                solar_bytes = solar_profile_file.getvalue()
+                if solar_profile_file.name.lower().endswith((".xlsx", ".xls")):
+                    sheet_names = excel_sheet_names(solar_bytes)
+                    default_sheet = sheet_names.index("Hourly") if "Hourly" in sheet_names else 0
+                    solar_sheet = st.selectbox("Solar workbook sheet", sheet_names, index=default_sheet, key="solar_sheet")
+                    default_header = 5 if solar_sheet == "Hourly" else 1
+                    solar_header_row = st.number_input("Header row in solar sheet", min_value=1, value=default_header, key="solar_header_row")
+                    solar_frame = read_energy_excel(solar_bytes, solar_sheet, int(solar_header_row))
+                else:
+                    solar_frame = read_energy_csv(solar_bytes)
                 solar_columns = list(solar_frame.columns)
                 time_default = next((i for i, col in enumerate(solar_columns) if any(word in col.lower() for word in ("time", "date", "stamp"))), 0)
-                energy_default = next((i for i, col in enumerate(solar_columns) if any(word in col.lower() for word in ("heat", "energy", "solar", "mwh", "kwh"))), min(1, len(solar_columns) - 1))
+                energy_default = next(
+                    (i for i, col in enumerate(solar_columns) if "net balance" in col.lower()),
+                    next((i for i, col in enumerate(solar_columns) if any(word in col.lower() for word in ("heat", "energy", "solar", "mwh", "kwh"))), min(1, len(solar_columns) - 1)),
+                )
                 solar_time_col = st.selectbox("Solar profile timestamp column", solar_columns, index=time_default, key="solar_time_col")
                 solar_energy_col = st.selectbox("Solar interval-energy column", solar_columns, index=energy_default, key="solar_energy_col")
-                solar_unit = st.selectbox("Solar interval-energy unit", ["MWh", "kWh"], key="solar_energy_unit")
+                unit_default = 1 if "kwh" in solar_energy_col.lower() else 0
+                solar_unit = st.selectbox("Solar interval-energy unit", ["MWh", "kWh"], index=unit_default, key="solar_energy_unit")
                 solar_time = pd.to_datetime(solar_frame[solar_time_col], errors="coerce")
                 solar_values = numeric_series(solar_frame, solar_energy_col)
                 multiplier = 0.001 if solar_unit == "kWh" else 1.0
