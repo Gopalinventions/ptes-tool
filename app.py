@@ -5,7 +5,8 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from designer_integration import design_geometry, designer_html
-from energy_balance import EnergySystemInputs, simulate_monthly_balance
+from energy_balance import DEFAULT_DEMAND_SHARES, EnergySystemInputs, simulate_monthly_balance
+from hourly_dispatch import run_hourly_dispatch
 from thermal_ui import render_thermal
 from folium.features import GeoJsonPopup
 from folium.plugins import Draw
@@ -97,6 +98,20 @@ def read_energy_excel(file_bytes: bytes, sheet_name: str, header_row: int) -> pd
 def numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
     """Accept decimal commas as well as decimal points in uploaded CSV files."""
     return pd.to_numeric(frame[column].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+
+
+def hourly_energy_profile(timestamps: pd.Series, energy: pd.Series, name: str) -> pd.DataFrame:
+    """Normalise uploaded interval-energy data onto unique UTC-naive hourly timestamps."""
+    stamp = pd.to_datetime(timestamps, errors="coerce", utc=True).dt.tz_convert(None).dt.floor("h")
+    table = pd.DataFrame({"Timestamp": stamp, name: energy}).dropna()
+    return table.groupby("Timestamp", as_index=False)[name].sum()
+
+
+def default_hourly_demand(index: pd.DatetimeIndex, annual_mwh: float) -> pd.Series:
+    """Fallback monthly demand distribution; never presented as an uploaded profile."""
+    hours_by_month = pd.Series(index.month).value_counts().to_dict()
+    return pd.Series([annual_mwh * DEFAULT_DEMAND_SHARES[stamp.month - 1] / hours_by_month[stamp.month]
+                      for stamp in index], index=index)
 
 
 def json_safe(layer):
@@ -362,6 +377,7 @@ with st.sidebar:
             help="Enter a site-specific annual net yield from your solar model. The default is only a WÜST planning-screen value.",
         )
         solar_monthly_profile = None
+        solar_hourly_profile = None
         solar_profile_file = st.file_uploader(
             "Optional solar heat-energy profile (CSV or Excel)", type=["csv", "txt", "xlsx", "xls"], key="solar_profile"
         )
@@ -390,6 +406,7 @@ with st.sidebar:
                 solar_time = pd.to_datetime(solar_frame[solar_time_col], errors="coerce")
                 solar_values = numeric_series(solar_frame, solar_energy_col)
                 multiplier = 0.001 if solar_unit == "kWh" else 1.0
+                solar_hourly_profile = hourly_energy_profile(solar_time, solar_values * multiplier, "Solar [MWh]")
                 grouped = pd.DataFrame({"month": solar_time.dt.month, "energy": solar_values * multiplier}).dropna().groupby("month")["energy"].sum()
                 solar_monthly_profile = tuple(float(grouped.get(month, 0.0)) for month in range(1, 13))
                 st.success(f"Solar profile accepted: {sum(solar_monthly_profile):,.0f} MWh net heat across 12 months.")
@@ -398,8 +415,10 @@ with st.sidebar:
         bhkw_electrical_kw = st.number_input("BHKW electrical capacity combined [kWe]", 0.0, value=1950.0,
                                               help="Used with the uploaded day-ahead prices for electricity revenue.")
         bhkw_thermal_kw = st.number_input("BHKW thermal capacity combined [kWth]", 0.0, value=2390.0)
+        bhkw_fuel_per_mwh_e = st.number_input("BHKW fuel input per electricity output [MWhfuel/MWhe]", 0.1, value=2.4728)
         bhkw_mode = st.radio("BHKW operating-hours method", ["Manual planning hours", "2025 day-ahead price threshold"], horizontal=True)
         day_ahead_summary = None
+        day_ahead_hourly = None
         if bhkw_mode == "Manual planning hours":
             bhkw_summer_hours = st.number_input("BHKW selected summer operating hours [h/year]", 0.0, value=0.0)
         else:
@@ -423,6 +442,7 @@ with st.sidebar:
                         "mean_price": float(prices[selected].mean()) if selected.any() else 0.0,
                         "revenue_eur": float((prices[selected] * bhkw_electrical_kw / 1000).sum()),
                     }
+                    day_ahead_hourly = hourly_energy_profile(price_time, prices, "Price [€/MWh]")
                     st.success(f"Selected May–September BHKW hours: {bhkw_summer_hours:,.0f} h; mean price: {day_ahead_summary['mean_price']:,.1f} €/MWh.")
                 except (ValueError, KeyError, pd.errors.ParserError) as exc:
                     st.warning(f"Day-ahead price file could not be read: {exc}. Upload the CSV again or use manual hours.")
@@ -437,6 +457,27 @@ with st.sidebar:
             "PTES monthly standing loss [%]", min_value=0.0, max_value=99.0, value=0.0,
             help="Keep at 0 until cover, liner, sidewall and ground-loss results are verified in the thermal model.",
         )
+        demand_hourly_profile = None
+        demand_profile_file = st.file_uploader("Optional hourly heat-demand profile CSV", type=["csv", "txt"], key="demand_profile")
+        if demand_profile_file is not None:
+            try:
+                demand_frame = read_energy_csv(demand_profile_file.getvalue())
+                demand_columns = list(demand_frame.columns)
+                demand_time_default = next((i for i, col in enumerate(demand_columns) if any(word in col.lower() for word in ("time", "date", "stamp"))), 0)
+                demand_energy_default = next((i for i, col in enumerate(demand_columns) if any(word in col.lower() for word in ("heat", "demand", "energy", "mwh", "kwh"))), min(1, len(demand_columns) - 1))
+                demand_time_col = st.selectbox("Demand-profile timestamp column", demand_columns, index=demand_time_default, key="demand_time_col")
+                demand_energy_col = st.selectbox("Demand interval-energy column", demand_columns, index=demand_energy_default, key="demand_energy_col")
+                demand_unit = st.selectbox("Demand interval-energy unit", ["MWh", "kWh"], key="demand_energy_unit")
+                demand_multiplier = 0.001 if demand_unit == "kWh" else 1.0
+                demand_hourly_profile = hourly_energy_profile(
+                    demand_frame[demand_time_col], numeric_series(demand_frame, demand_energy_col) * demand_multiplier,
+                    "Demand [MWh]",
+                )
+                st.success(f"Demand profile accepted: {demand_hourly_profile['Demand [MWh]'].sum():,.0f} MWh across {len(demand_hourly_profile):,} hours.")
+            except (ValueError, KeyError, pd.errors.ParserError) as exc:
+                st.warning(f"Demand profile could not be read: {exc}. A monthly-distribution fallback will be labelled in the output.")
+        hourly_initial_soc = st.slider("Hourly model: initial PTES state of charge [%]", 0.0, 100.0, 0.0) / 100
+        hourly_hp_max_price = st.number_input("Hourly model: heat-pump maximum electricity price [€/MWh]", value=80.0)
     with st.expander("3 · Connection-pipe design point"):
         st.caption("One hydraulic operating point for DN and pressure-loss screening. This is NOT a charging schedule. Run hourly operation in Step 3 of the main page.")
         operating_mode = st.selectbox("Hydraulic screening mode", ["Charging", "Discharging", "Idle"])
@@ -583,6 +624,50 @@ with st.expander("Open linked charging, discharging and source balance", expande
         "ptes_interlinked_energy_balance.csv", "text/csv",
     )
     st.info(energy_balance["model_status"])
+
+st.subheader("Step 0b · Hourly dispatch — uploaded profiles")
+st.caption("Solar and demand are aligned to the uploaded day-ahead hourly timestamps. Source operation is heat-acceptance limited: it cannot charge PTES beyond its selected volume.")
+if day_ahead_hourly is None:
+    st.info("For hourly BHKW dispatch, select ‘2025 day-ahead price threshold’ in Section 2c and upload the day-ahead price CSV.")
+else:
+    hourly_input = day_ahead_hourly.copy()
+    if solar_hourly_profile is None:
+        hourly_input["Solar [MWh]"] = 0.0
+        solar_status = "No hourly solar file uploaded: solar is set to zero in the hourly engine."
+    else:
+        hourly_input = hourly_input.merge(solar_hourly_profile, on="Timestamp", how="left")
+        hourly_input["Solar [MWh]"] = hourly_input["Solar [MWh]"].fillna(0.0)
+        solar_status = "Uploaded solar hourly profile used."
+    if demand_hourly_profile is None:
+        hourly_input["Demand [MWh]"] = default_hourly_demand(pd.DatetimeIndex(hourly_input["Timestamp"]), annual_demand).to_numpy()
+        demand_status = "Fallback monthly demand distribution used — upload hourly demand for a dispatch decision."
+    else:
+        hourly_input = hourly_input.merge(demand_hourly_profile, on="Timestamp", how="left")
+        hourly_input["Demand [MWh]"] = hourly_input["Demand [MWh]"].fillna(0.0)
+        demand_status = "Uploaded hourly demand profile used."
+    try:
+        hourly_result = run_hourly_dispatch(
+            hourly_input[["Timestamp", "Demand [MWh]", "Solar [MWh]", "Price [€/MWh]"]],
+            storage_capacity_mwh=energy_balance["capacity_mwh"], initial_soc_fraction=hourly_initial_soc,
+            bhkw_thermal_kw=bhkw_thermal_kw, bhkw_electrical_kw=bhkw_electrical_kw,
+            bhkw_price_threshold=price_threshold, bhkw_fuel_per_mwh_e=bhkw_fuel_per_mwh_e,
+            heat_pump_thermal_kw=heat_pump_thermal_kw, heat_pump_cop=heat_pump_cop,
+            heat_pump_max_price=hourly_hp_max_price, waste_heat_kw=waste_heat_kw,
+            monthly_loss_percent=monthly_storage_loss,
+        )
+        hourly_metrics = hourly_result.sum(numeric_only=True)
+        h1, h2, h3, h4 = st.columns(4)
+        h1.metric("PTES charged", f"{hourly_metrics['PTES charge [MWh]']:,.0f} MWh")
+        h2.metric("PTES discharged", f"{hourly_metrics['PTES discharge [MWh]']:,.0f} MWh")
+        h3.metric("BHKW electricity revenue", f"€{hourly_metrics['BHKW electricity revenue [€]']:,.0f}")
+        h4.metric("Boiler heat remaining", f"{hourly_metrics['Boiler heat [MWh]']:,.0f} MWh")
+        st.caption(f"{solar_status} {demand_status}")
+        hourly_chart = hourly_result.set_index("Timestamp")[["Solar [MWh]", "BHKW heat [MWh]", "Heat pump heat [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]", "State of charge [MWh]"]]
+        st.line_chart(hourly_chart.resample("ME").sum(), use_container_width=True)
+        st.download_button("Download hourly dispatch CSV", hourly_result.to_csv(index=False).encode("utf-8"),
+                           "ptes_hourly_dispatch.csv", "text/csv")
+    except ValueError as exc:
+        st.warning(f"Hourly dispatch could not be calculated: {exc}")
 
 if uploaded is None:
     st.subheader("Step 1 · nPro network, energy hub and storage candidate")
