@@ -416,6 +416,10 @@ with st.sidebar:
                                               help="Used with the uploaded day-ahead prices for electricity revenue.")
         bhkw_thermal_kw = st.number_input("BHKW thermal capacity combined [kWth]", 0.0, value=2390.0)
         bhkw_fuel_per_mwh_e = st.number_input("BHKW fuel input per electricity output [MWhfuel/MWhe]", 0.1, value=2.4728)
+        bhkw_month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        bhkw_active_labels = st.multiselect("BHKW price-controlled operating months", bhkw_month_labels,
+                                            default=["May", "Jun", "Jul", "Aug", "Sep"])
+        bhkw_active_months = tuple(bhkw_month_labels.index(month) + 1 for month in bhkw_active_labels)
         bhkw_mode = st.radio("BHKW operating-hours method", ["Manual planning hours", "2025 day-ahead price threshold"], horizontal=True)
         day_ahead_summary = None
         day_ahead_hourly = None
@@ -435,7 +439,7 @@ with st.sidebar:
                     price_value_col = st.selectbox("Day-ahead price column", price_columns, index=price_value_default, key="price_value_col")
                     price_time = pd.to_datetime(price_frame[price_time_col], errors="coerce")
                     prices = numeric_series(price_frame, price_value_col)
-                    selected = (price_time.dt.month.isin([5, 6, 7, 8, 9]) & (prices >= price_threshold)).fillna(False)
+                    selected = (price_time.dt.month.isin(bhkw_active_months) & (prices >= price_threshold)).fillna(False)
                     bhkw_summer_hours = float(selected.sum())
                     day_ahead_summary = {
                         "hours": bhkw_summer_hours,
@@ -443,7 +447,7 @@ with st.sidebar:
                         "revenue_eur": float((prices[selected] * bhkw_electrical_kw / 1000).sum()),
                     }
                     day_ahead_hourly = hourly_energy_profile(price_time, prices, "Price [€/MWh]")
-                    st.success(f"Selected May–September BHKW hours: {bhkw_summer_hours:,.0f} h; mean price: {day_ahead_summary['mean_price']:,.1f} €/MWh.")
+                    st.success(f"Selected BHKW hours: {bhkw_summer_hours:,.0f} h; mean price: {day_ahead_summary['mean_price']:,.1f} €/MWh.")
                 except (ValueError, KeyError, pd.errors.ParserError) as exc:
                     st.warning(f"Day-ahead price file could not be read: {exc}. Upload the CSV again or use manual hours.")
             else:
@@ -651,6 +655,7 @@ else:
             storage_capacity_mwh=energy_balance["capacity_mwh"], initial_soc_fraction=hourly_initial_soc,
             bhkw_thermal_kw=bhkw_thermal_kw, bhkw_electrical_kw=bhkw_electrical_kw,
             bhkw_price_threshold=price_threshold, bhkw_fuel_per_mwh_e=bhkw_fuel_per_mwh_e,
+            bhkw_active_months=bhkw_active_months,
             heat_pump_thermal_kw=heat_pump_thermal_kw, heat_pump_cop=heat_pump_cop,
             heat_pump_max_price=hourly_hp_max_price, waste_heat_kw=waste_heat_kw,
             monthly_loss_percent=monthly_storage_loss,
@@ -662,8 +667,16 @@ else:
         h3.metric("BHKW electricity revenue", f"€{hourly_metrics['BHKW electricity revenue [€]']:,.0f}")
         h4.metric("Boiler heat remaining", f"{hourly_metrics['Boiler heat [MWh]']:,.0f} MWh")
         st.caption(f"{solar_status} {demand_status}")
-        hourly_chart = hourly_result.set_index("Timestamp")[["Solar [MWh]", "BHKW heat [MWh]", "Heat pump heat [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]", "State of charge [MWh]"]]
-        st.line_chart(hourly_chart.resample("ME").sum(), use_container_width=True)
+        hourly_indexed = hourly_result.set_index("Timestamp")
+        monthly_energy = hourly_indexed[["Solar [MWh]", "BHKW heat [MWh]", "Heat pump heat [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]"]].resample("ME").sum()
+        monthly_soc = hourly_indexed[["State of charge [MWh]"]].resample("ME").last()
+        chart_left, chart_right = st.columns(2)
+        with chart_left:
+            st.caption("Monthly heat flows")
+            st.bar_chart(monthly_energy, use_container_width=True)
+        with chart_right:
+            st.caption("PTES end-of-month state of charge — not summed")
+            st.line_chart(monthly_soc, use_container_width=True)
         st.download_button("Download hourly dispatch CSV", hourly_result.to_csv(index=False).encode("utf-8"),
                            "ptes_hourly_dispatch.csv", "text/csv")
     except ValueError as exc:

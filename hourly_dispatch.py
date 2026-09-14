@@ -8,7 +8,7 @@ import pandas as pd
 def run_hourly_dispatch(
     frame: pd.DataFrame, *, storage_capacity_mwh: float, initial_soc_fraction: float,
     bhkw_thermal_kw: float, bhkw_electrical_kw: float, bhkw_price_threshold: float,
-    bhkw_fuel_per_mwh_e: float, heat_pump_thermal_kw: float, heat_pump_cop: float,
+    bhkw_fuel_per_mwh_e: float, bhkw_active_months: tuple[int, ...], heat_pump_thermal_kw: float, heat_pump_cop: float,
     heat_pump_max_price: float, waste_heat_kw: float, monthly_loss_percent: float,
 ) -> pd.DataFrame:
     """Run a heat-acceptance-limited merit order on aligned hourly profiles.
@@ -45,7 +45,7 @@ def run_hourly_dispatch(
         remaining -= direct_waste
         waste_surplus = waste - direct_waste
         headroom -= solar_surplus + waste_surplus
-        bhkw_eligible = price >= bhkw_price_threshold
+        bhkw_eligible = row[0].month in bhkw_active_months and price >= bhkw_price_threshold
         bhkw = min(bhkw_thermal_kw / 1000 if bhkw_eligible else 0.0, remaining + max(0.0, headroom))
         direct_bhkw = min(remaining, bhkw)
         remaining -= direct_bhkw
