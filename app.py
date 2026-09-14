@@ -78,6 +78,17 @@ THEMES = {
 }
 
 
+@st.cache_data(show_spinner="Reading energy-profile file…")
+def read_energy_csv(file_bytes: bytes) -> pd.DataFrame:
+    """Read comma- or semicolon-separated planning data without assuming a vendor."""
+    return pd.read_csv(io.BytesIO(file_bytes), sep=None, engine="python")
+
+
+def numeric_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    """Accept decimal commas as well as decimal points in uploaded CSV files."""
+    return pd.to_numeric(frame[column].astype(str).str.replace(",", ".", regex=False), errors="coerce")
+
+
 def json_safe(layer):
     layer = layer.copy()
     for col in layer.columns:
@@ -340,11 +351,58 @@ with st.sidebar:
             "Solar net specific yield [kWhth/kWth/year]", 0.0, value=1030.0,
             help="Enter a site-specific annual net yield from your solar model. The default is only a WÜST planning-screen value.",
         )
+        solar_monthly_profile = None
+        solar_profile_file = st.file_uploader("Optional solar heat-energy profile CSV", type=["csv", "txt"], key="solar_profile")
+        if solar_profile_file is not None:
+            try:
+                solar_frame = read_energy_csv(solar_profile_file.getvalue())
+                solar_columns = list(solar_frame.columns)
+                time_default = next((i for i, col in enumerate(solar_columns) if any(word in col.lower() for word in ("time", "date", "stamp"))), 0)
+                energy_default = next((i for i, col in enumerate(solar_columns) if any(word in col.lower() for word in ("heat", "energy", "solar", "mwh", "kwh"))), min(1, len(solar_columns) - 1))
+                solar_time_col = st.selectbox("Solar profile timestamp column", solar_columns, index=time_default, key="solar_time_col")
+                solar_energy_col = st.selectbox("Solar interval-energy column", solar_columns, index=energy_default, key="solar_energy_col")
+                solar_unit = st.selectbox("Solar interval-energy unit", ["MWh", "kWh"], key="solar_energy_unit")
+                solar_time = pd.to_datetime(solar_frame[solar_time_col], errors="coerce")
+                solar_values = numeric_series(solar_frame, solar_energy_col)
+                multiplier = 0.001 if solar_unit == "kWh" else 1.0
+                grouped = pd.DataFrame({"month": solar_time.dt.month, "energy": solar_values * multiplier}).dropna().groupby("month")["energy"].sum()
+                solar_monthly_profile = tuple(float(grouped.get(month, 0.0)) for month in range(1, 13))
+                st.success(f"Solar profile accepted: {sum(solar_monthly_profile):,.0f} MWh net heat across 12 months.")
+            except (ValueError, KeyError, pd.errors.ParserError) as exc:
+                st.warning(f"Solar profile could not be read: {exc}. The annual-yield method remains active.")
         bhkw_electrical_kw = st.number_input("BHKW electrical capacity combined [kWe]", 0.0, value=1950.0,
-                                              help="Used in the future electricity-market dispatch layer.")
+                                              help="Used with the uploaded day-ahead prices for electricity revenue.")
         bhkw_thermal_kw = st.number_input("BHKW thermal capacity combined [kWth]", 0.0, value=2390.0)
-        bhkw_summer_hours = st.number_input("BHKW selected summer operating hours [h/year]", 0.0, value=0.0,
-                                             help="Use price-selected operating hours from the day-ahead BHKW screen, or enter a planning case.")
+        bhkw_mode = st.radio("BHKW operating-hours method", ["Manual planning hours", "2025 day-ahead price threshold"], horizontal=True)
+        day_ahead_summary = None
+        if bhkw_mode == "Manual planning hours":
+            bhkw_summer_hours = st.number_input("BHKW selected summer operating hours [h/year]", 0.0, value=0.0)
+        else:
+            day_ahead_file = st.file_uploader("Upload day-ahead electricity-price CSV", type=["csv", "txt"], key="day_ahead_prices")
+            price_threshold = st.number_input("BHKW minimum day-ahead price [€/MWh]", value=100.0)
+            bhkw_summer_hours = 0.0
+            if day_ahead_file is not None:
+                try:
+                    price_frame = read_energy_csv(day_ahead_file.getvalue())
+                    price_columns = list(price_frame.columns)
+                    price_time_default = next((i for i, col in enumerate(price_columns) if any(word in col.lower() for word in ("start", "time", "date"))), 0)
+                    price_value_default = next((i for i, col in enumerate(price_columns) if any(word in col.lower() for word in ("price", "germany", "luxembourg", "eur"))), min(1, len(price_columns) - 1))
+                    price_time_col = st.selectbox("Day-ahead timestamp column", price_columns, index=price_time_default, key="price_time_col")
+                    price_value_col = st.selectbox("Day-ahead price column", price_columns, index=price_value_default, key="price_value_col")
+                    price_time = pd.to_datetime(price_frame[price_time_col], errors="coerce")
+                    prices = numeric_series(price_frame, price_value_col)
+                    selected = (price_time.dt.month.isin([5, 6, 7, 8, 9]) & (prices >= price_threshold)).fillna(False)
+                    bhkw_summer_hours = float(selected.sum())
+                    day_ahead_summary = {
+                        "hours": bhkw_summer_hours,
+                        "mean_price": float(prices[selected].mean()) if selected.any() else 0.0,
+                        "revenue_eur": float((prices[selected] * bhkw_electrical_kw / 1000).sum()),
+                    }
+                    st.success(f"Selected May–September BHKW hours: {bhkw_summer_hours:,.0f} h; mean price: {day_ahead_summary['mean_price']:,.1f} €/MWh.")
+                except (ValueError, KeyError, pd.errors.ParserError) as exc:
+                    st.warning(f"Day-ahead price file could not be read: {exc}. Upload the CSV again or use manual hours.")
+            else:
+                st.info("Upload the day-ahead CSV to calculate BHKW operating hours from the selected price threshold.")
         heat_pump_thermal_kw = st.number_input("Heat-pump thermal capacity combined [kWth]", 0.0, value=0.0)
         heat_pump_summer_hours = st.number_input("Heat-pump summer operating hours [h/year]", 0.0, value=0.0)
         heat_pump_cop = st.number_input("Heat-pump seasonal COP", min_value=0.1, value=3.0)
@@ -459,6 +517,8 @@ try:
         storage_volume_m3=storage["volume_m3"], hot_c=tmax, cold_c=tmin,
         usable_capacity_factor=efficiency,
         solar_net_annual_mwh=solar_thermal_kw * solar_specific_yield / 1000,
+        solar_monthly_mwh=solar_monthly_profile,
+        bhkw_electrical_kw=bhkw_electrical_kw,
         bhkw_thermal_kw=bhkw_thermal_kw, bhkw_summer_hours=bhkw_summer_hours,
         heat_pump_thermal_kw=heat_pump_thermal_kw,
         heat_pump_summer_hours=heat_pump_summer_hours, heat_pump_cop=heat_pump_cop,
@@ -477,12 +537,20 @@ energy_col1.metric("Selected PTES capacity", f"{energy_balance['capacity_mwh']:,
 energy_col2.metric("Maximum PTES state of charge", f"{energy_balance['maximum_soc_mwh']:,.0f} MWh")
 energy_col3.metric("PTES winter discharge", f"{energy_balance['totals']['PTES discharge [MWh]']:,.0f} MWh")
 energy_col4.metric("Remaining boiler heat", f"{energy_balance['totals']['Remaining boiler heat [MWh]']:,.0f} MWh")
+if day_ahead_summary is not None:
+    market_col1, market_col2, market_col3 = st.columns(3)
+    market_col1.metric("BHKW price-selected hours", f"{day_ahead_summary['hours']:,.0f} h")
+    market_col2.metric("Selected mean price", f"{day_ahead_summary['mean_price']:,.1f} €/MWh")
+    market_col3.metric("Gross BHKW electricity revenue", f"€{day_ahead_summary['revenue_eur']:,.0f}")
+    st.caption("Gross market revenue only. Gas, O&M, starts, demand acceptance and PTES limits are assessed separately.")
 with st.expander("Open linked charging, discharging and source balance", expanded=True):
     energy_frame = pd.DataFrame(energy_balance["rows"])
     chart_frame = energy_frame.set_index("Month")[[
         "Solar [MWh]", "BHKW heat [MWh]", "Heat pump heat [MWh]", "Waste heat [MWh]",
         "PTES charge [MWh]", "PTES discharge [MWh]", "PTES state of charge [MWh]",
     ]]
+    chart_frame.index = pd.date_range("2025-01-01", periods=12, freq="MS")
+    chart_frame.index.name = "Month"
     st.line_chart(chart_frame, use_container_width=True)
     st.dataframe(energy_frame.round(1), hide_index=True, use_container_width=True)
     st.download_button(

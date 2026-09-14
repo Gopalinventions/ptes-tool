@@ -30,6 +30,8 @@ class EnergySystemInputs:
     cold_c: float
     usable_capacity_factor: float
     solar_net_annual_mwh: float
+    solar_monthly_mwh: tuple[float, ...] | None
+    bhkw_electrical_kw: float
     bhkw_thermal_kw: float
     bhkw_summer_hours: float
     heat_pump_thermal_kw: float
@@ -48,7 +50,7 @@ def _summer_distribution(total_mwh: float) -> list[float]:
 
 def validate_inputs(x: EnergySystemInputs) -> None:
     numeric = (x.annual_demand_mwh, x.storage_volume_m3, x.solar_net_annual_mwh,
-               x.bhkw_thermal_kw, x.bhkw_summer_hours, x.heat_pump_thermal_kw,
+               x.bhkw_electrical_kw, x.bhkw_thermal_kw, x.bhkw_summer_hours, x.heat_pump_thermal_kw,
                x.heat_pump_summer_hours, x.waste_heat_kw, x.waste_heat_summer_hours)
     if any(value < 0 for value in numeric):
         raise ValueError("Demand, volume, capacities and operating hours cannot be negative.")
@@ -60,6 +62,9 @@ def validate_inputs(x: EnergySystemInputs) -> None:
         raise ValueError("Usable capacity factor must be between 0 and 1.")
     if x.heat_pump_cop <= 0:
         raise ValueError("Heat-pump COP must be greater than zero.")
+    if x.solar_monthly_mwh is not None:
+        if len(x.solar_monthly_mwh) != 12 or any(value < 0 for value in x.solar_monthly_mwh):
+            raise ValueError("Uploaded solar profile must contain 12 non-negative monthly energy values.")
     if not 0 <= x.monthly_storage_loss_percent < 100:
         raise ValueError("Monthly storage loss must be from 0 up to (but not including) 100%.")
 
@@ -75,7 +80,9 @@ def simulate_monthly_balance(x: EnergySystemInputs) -> dict:
     validate_inputs(x)
     capacity_mwh = x.storage_volume_m3 * 1.163 * (x.hot_c - x.cold_c) / 1000 * x.usable_capacity_factor
     demand = [x.annual_demand_mwh * share for share in DEFAULT_DEMAND_SHARES]
-    solar = [x.solar_net_annual_mwh * share for share in DEFAULT_SOLAR_SHARES]
+    solar = (list(x.solar_monthly_mwh) if x.solar_monthly_mwh is not None
+             else [x.solar_net_annual_mwh * share for share in DEFAULT_SOLAR_SHARES])
+    bhkw_electricity = _summer_distribution(x.bhkw_electrical_kw * x.bhkw_summer_hours / 1000)
     bhkw = _summer_distribution(x.bhkw_thermal_kw * x.bhkw_summer_hours / 1000)
     heat_pump = _summer_distribution(x.heat_pump_thermal_kw * x.heat_pump_summer_hours / 1000)
     waste_heat = _summer_distribution(x.waste_heat_kw * x.waste_heat_summer_hours / 1000)
@@ -98,7 +105,7 @@ def simulate_monthly_balance(x: EnergySystemInputs) -> dict:
         boiler = deficit - discharge
         rows.append({
             "Month": month, "Demand [MWh]": demand[index], "Solar [MWh]": solar[index],
-            "BHKW heat [MWh]": bhkw[index], "Heat pump heat [MWh]": heat_pump[index],
+            "BHKW electricity [MWh]": bhkw_electricity[index], "BHKW heat [MWh]": bhkw[index], "Heat pump heat [MWh]": heat_pump[index],
             "Waste heat [MWh]": waste_heat[index], "Direct source supply [MWh]": direct_supply,
             "PTES charge [MWh]": accepted_charge, "PTES discharge [MWh]": discharge,
             "PTES loss [MWh]": standing_loss, "PTES state of charge [MWh]": soc,
