@@ -64,8 +64,12 @@ def run_hourly_dispatch(
         bhkw2 = min(bhkw2_thermal_kw / 1000 if bhkw_eligible else 0.0, max(0.0, bhkw_acceptance - bhkw1))
         bhkw = bhkw1 + bhkw2
         direct_bhkw = min(remaining, bhkw) if direct_allowed else 0.0
+        bhkw1_direct = min(bhkw1, direct_bhkw)
+        bhkw2_direct = min(bhkw2, max(0.0, direct_bhkw - bhkw1_direct))
         remaining -= direct_bhkw
         bhkw_surplus = bhkw - direct_bhkw if charge_allowed else 0.0
+        bhkw1_to_ptes = bhkw1 - bhkw1_direct if charge_allowed else 0.0
+        bhkw2_to_ptes = bhkw2 - bhkw2_direct if charge_allowed else 0.0
         headroom -= bhkw_surplus
         hp_eligible = price <= heat_pump_max_price
         hp = min(heat_pump_thermal_kw / 1000 if hp_eligible else 0.0, remaining + max(0.0, headroom))
@@ -85,7 +89,12 @@ def run_hourly_dispatch(
             "Solar to PTES [MWh]": solar_to_ptes, "Solar curtailment [MWh]": solar_curtailed,
             "Waste heat [MWh]": waste, "BHKW 1 heat [MWh]": bhkw1,
             "BHKW 2 heat [MWh]": bhkw2, "BHKW heat [MWh]": bhkw,
-            "BHKW direct network [MWh]": direct_bhkw, "BHKW to PTES [MWh]": bhkw_surplus,
+            "BHKW 1 direct network [MWh]": bhkw1_direct,
+            "BHKW 2 direct network [MWh]": bhkw2_direct,
+            "BHKW direct network [MWh]": direct_bhkw,
+            "BHKW 1 to PTES [MWh]": bhkw1_to_ptes,
+            "BHKW 2 to PTES [MWh]": bhkw2_to_ptes,
+            "BHKW to PTES [MWh]": bhkw_surplus,
             "BHKW 1 electricity [MWh]": bhkw1_electricity,
             "BHKW 2 electricity [MWh]": bhkw2_electricity, "BHKW electricity [MWh]": bhkw_electricity,
             "BHKW fuel [MWh]": bhkw_electricity * bhkw_fuel_per_mwh_e,

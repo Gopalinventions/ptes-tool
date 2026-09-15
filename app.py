@@ -300,6 +300,58 @@ def project_excel_workbook(inputs, energy_monthly, hourly_result, geometry, cand
     return output.getvalue()
 
 
+def hourly_dispatch_excel_workbook(hourly_result, monthly_energy, monthly_soc, inputs):
+    """Export the operating model as an understandable workbook, not a raw CSV."""
+    output = io.BytesIO()
+    readme = pd.DataFrame([
+        {"Section": "Summer BHKW charging", "Explanation": "Only May–September BHKW-to-PTES operation uses the selected day-ahead price threshold."},
+        {"Section": "Winter BHKW heat", "Explanation": "October–April BHKW direct-network heat follows demand. It is not selected by electricity price."},
+        {"Section": "Solar thermal", "Explanation": "Solar thermal charges PTES first. It is curtailed only when PTES is full."},
+        {"Section": "PTES discharge", "Explanation": "PTES supplies heat only in selected discharge months and only while stored heat is available."},
+        {"Section": "Boiler heat", "Explanation": "Boiler heat is the remaining network demand after direct sources and PTES discharge."},
+    ])
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        readme.to_excel(writer, sheet_name="Read me", index=False)
+        inputs.to_excel(writer, sheet_name="Active inputs", index=False)
+        monthly_energy.reset_index().to_excel(writer, sheet_name="Monthly operations", index=False)
+        monthly_soc.reset_index().to_excel(writer, sheet_name="PTES state of charge", index=False)
+        hourly_result.to_excel(writer, sheet_name="Hourly dispatch", index=False)
+        for sheet in writer.book.worksheets:
+            sheet.freeze_panes = "A2"
+            sheet.sheet_view.showGridLines = False
+            sheet.row_dimensions[1].height = 32
+            for cell in sheet[1]:
+                cell.font = Font(bold=True, color="FFFFFF")
+                cell.fill = PatternFill("solid", fgColor="1F4E78")
+                cell.alignment = Alignment(wrap_text=True, vertical="center")
+            for column in sheet.columns:
+                sheet.column_dimensions[column[0].column_letter].width = min(32, max(13, max(len(str(cell.value or "")) for cell in column) + 2))
+        operations = writer.sheets["Monthly operations"]
+        columns = list(monthly_energy.reset_index().columns)
+        chart_columns = [name for name in ["Solar to PTES [MWh]", "BHKW 1 to PTES [MWh]", "BHKW 2 to PTES [MWh]", "BHKW 1 direct network [MWh]", "BHKW 2 direct network [MWh]", "PTES discharge [MWh]", "Boiler heat [MWh]"] if name in columns]
+        if chart_columns:
+            chart = BarChart()
+            chart.type = "col"
+            chart.style = 10
+            chart.title = "Monthly energy flows"
+            chart.y_axis.title = "MWh"
+            chart.x_axis.title = "Month"
+            for name in chart_columns:
+                chart.add_data(Reference(operations, min_col=columns.index(name) + 1, min_row=1, max_row=len(monthly_energy) + 1), titles_from_data=True)
+            chart.set_categories(Reference(operations, min_col=1, min_row=2, max_row=len(monthly_energy) + 1))
+            operations.add_chart(chart, "A18")
+        soc_sheet = writer.sheets["PTES state of charge"]
+        soc_columns = list(monthly_soc.reset_index().columns)
+        if "State of charge [MWh]" in soc_columns:
+            chart = LineChart()
+            chart.title = "PTES end-of-month state of charge"
+            chart.y_axis.title = "MWh"
+            chart.add_data(Reference(soc_sheet, min_col=soc_columns.index("State of charge [MWh]") + 1, min_row=1, max_row=len(monthly_soc) + 1), titles_from_data=True)
+            chart.set_categories(Reference(soc_sheet, min_col=1, min_row=2, max_row=len(monthly_soc) + 1))
+            soc_sheet.add_chart(chart, "A18")
+    return output.getvalue()
+
+
 def add_layer(fmap, layer, name, definitions, style, highlight):
     fields = [f for f in definitions if f in layer.columns]
     popup = GeoJsonPopup(fields, [definitions[f] for f in fields], localize=True) if fields else None
@@ -803,15 +855,49 @@ else:
         h4.metric("Boiler heat remaining", f"{hourly_metrics['Boiler heat [MWh]']:,.0f} MWh")
         st.caption(f"{solar_status} {demand_status} {cycle_status}")
         hourly_indexed = hourly_result.set_index("Timestamp")
-        monthly_energy = hourly_indexed[["Solar [MWh]", "Solar to PTES [MWh]", "BHKW 1 heat [MWh]", "BHKW 2 heat [MWh]", "BHKW direct network [MWh]", "BHKW to PTES [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]"]].resample("ME").sum()
+        monthly_energy = hourly_indexed[[
+            "Solar [MWh]", "Solar to PTES [MWh]",
+            "BHKW 1 direct network [MWh]", "BHKW 2 direct network [MWh]",
+            "BHKW 1 to PTES [MWh]", "BHKW 2 to PTES [MWh]",
+            "PTES charge [MWh]", "PTES discharge [MWh]", "Boiler heat [MWh]",
+        ]].resample("ME").sum()
         monthly_soc = hourly_indexed[["State of charge [MWh]"]].resample("ME").last()
+        if monthly_energy[["BHKW 1 direct network [MWh]", "BHKW 2 direct network [MWh]"]].to_numpy().sum() == 0:
+            st.warning("Winter BHKW direct-network heat is zero in this run. Check that October–April are selected as BHKW direct-network months and that the hourly demand profile contains winter demand.")
         chart_left, chart_right = st.columns(2)
         with chart_left:
-            st.caption("Monthly heat flows")
-            st.bar_chart(monthly_energy, use_container_width=True)
+            st.caption("Monthly source and PTES heat flows")
+            st.bar_chart(monthly_energy[["Solar to PTES [MWh]", "BHKW 1 direct network [MWh]", "BHKW 2 direct network [MWh]", "BHKW 1 to PTES [MWh]", "BHKW 2 to PTES [MWh]", "PTES discharge [MWh]", "Boiler heat [MWh]"]], use_container_width=True)
         with chart_right:
             st.caption("PTES end-of-month state of charge — not summed")
             st.line_chart(monthly_soc, use_container_width=True)
+        st.markdown("**Monthly operating table — BHKW flows shown separately**")
+        source_table = monthly_energy[["BHKW 1 direct network [MWh]", "BHKW 2 direct network [MWh]", "BHKW 1 to PTES [MWh]", "BHKW 2 to PTES [MWh]", "Boiler heat [MWh]"]].copy()
+        source_table.index = source_table.index.strftime("%b %Y")
+        source_table.index.name = "Month"
+        storage_table = monthly_energy[["Solar to PTES [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]"]].copy()
+        storage_table["PTES state of charge [MWh]"] = monthly_soc["State of charge [MWh]"]
+        storage_table.index = storage_table.index.strftime("%b %Y")
+        storage_table.index.name = "Month"
+        table_left, table_right = st.columns(2)
+        with table_left:
+            st.caption("BHKW and network heat")
+            st.dataframe(source_table.round(1), use_container_width=True)
+        with table_right:
+            st.caption("Solar and PTES")
+            st.dataframe(storage_table.round(1), use_container_width=True)
+        hourly_export_inputs = pd.DataFrame([
+            {"Input": "Summer BHKW charging price threshold [€/MWh]", "Value": price_threshold},
+            {"Input": "BHKW direct-network months", "Value": ", ".join(bhkw_direct_labels)},
+            {"Input": "BHKW-to-PTES charging months", "Value": ", ".join(bhkw_charge_labels)},
+            {"Input": "PTES discharge months", "Value": ", ".join(ptes_discharge_labels)},
+            {"Input": "PTES cycle view", "Value": storage_cycle_view},
+            {"Input": "Initial PTES state of charge [%]", "Value": hourly_initial_soc * 100},
+        ])
+        st.download_button("Download hourly dispatch Excel workbook (tables, charts and explanation)",
+                           hourly_dispatch_excel_workbook(hourly_result, monthly_energy, monthly_soc, hourly_export_inputs),
+                           "ptes_hourly_dispatch_explained.xlsx",
+                           "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         st.download_button("Download hourly dispatch CSV", hourly_result.to_csv(index=False).encode("utf-8"),
                            "ptes_hourly_dispatch.csv", "text/csv")
     except ValueError as exc:
