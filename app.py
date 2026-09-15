@@ -412,9 +412,14 @@ with st.sidebar:
                 st.success(f"Solar profile accepted: {sum(solar_monthly_profile):,.0f} MWh net heat across 12 months.")
             except (ValueError, KeyError, pd.errors.ParserError) as exc:
                 st.warning(f"Solar profile could not be read: {exc}. The annual-yield method remains active.")
-        bhkw_electrical_kw = st.number_input("BHKW electrical capacity combined [kWe]", 0.0, value=1950.0,
-                                              help="Used with the uploaded day-ahead prices for electricity revenue.")
-        bhkw_thermal_kw = st.number_input("BHKW thermal capacity combined [kWth]", 0.0, value=2390.0)
+        st.markdown("**BHKW design — direct energy-hub supply and optional PTES charging**")
+        bhkw1_electrical_kw = st.number_input("BHKW 1 electrical capacity [kWe]", 0.0, value=975.0)
+        bhkw1_thermal_kw = st.number_input("BHKW 1 thermal capacity [kWth]", 0.0, value=1195.0)
+        bhkw2_electrical_kw = st.number_input("BHKW 2 electrical capacity [kWe]", 0.0, value=975.0)
+        bhkw2_thermal_kw = st.number_input("BHKW 2 thermal capacity [kWth]", 0.0, value=1195.0)
+        bhkw_electrical_kw = bhkw1_electrical_kw + bhkw2_electrical_kw
+        bhkw_thermal_kw = bhkw1_thermal_kw + bhkw2_thermal_kw
+        st.caption(f"Combined BHKW capacity used in the simple dispatch: {bhkw_electrical_kw:,.0f} kWe and {bhkw_thermal_kw:,.0f} kWth.")
         bhkw_fuel_per_mwh_e = st.number_input("BHKW fuel input per electricity output [MWhfuel/MWhe]", 0.1, value=2.4728)
         bhkw_month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
         bhkw_active_labels = st.multiselect("BHKW price-controlled operating months", bhkw_month_labels,
@@ -452,15 +457,20 @@ with st.sidebar:
                     st.warning(f"Day-ahead price file could not be read: {exc}. Upload the CSV again or use manual hours.")
             else:
                 st.info("Upload the day-ahead CSV to calculate BHKW operating hours from the selected price threshold.")
-        heat_pump_thermal_kw = st.number_input("Heat-pump thermal capacity combined [kWth]", 0.0, value=0.0)
-        heat_pump_summer_hours = st.number_input("Heat-pump summer operating hours [h/year]", 0.0, value=0.0)
-        heat_pump_cop = st.number_input("Heat-pump seasonal COP", min_value=0.1, value=3.0)
-        waste_heat_kw = st.number_input("Waste-heat available capacity [kWth]", 0.0, value=0.0)
-        waste_heat_summer_hours = st.number_input("Waste-heat summer availability [h/year]", 0.0, value=0.0)
-        monthly_storage_loss = st.number_input(
-            "PTES monthly standing loss [%]", min_value=0.0, max_value=99.0, value=0.0,
-            help="Keep at 0 until cover, liner, sidewall and ground-loss results are verified in the thermal model.",
-        )
+        show_advanced_energy = st.checkbox("Show advanced heat-pump, waste-heat and storage settings", value=False)
+        heat_pump_thermal_kw = heat_pump_summer_hours = waste_heat_kw = waste_heat_summer_hours = 0.0
+        heat_pump_cop, monthly_storage_loss = 3.0, 0.0
+        hourly_initial_soc, hourly_hp_max_price = 0.0, 80.0
+        if show_advanced_energy:
+            heat_pump_thermal_kw = st.number_input("Heat-pump thermal capacity combined [kWth]", 0.0, value=0.0)
+            heat_pump_summer_hours = st.number_input("Heat-pump summer operating hours [h/year]", 0.0, value=0.0)
+            heat_pump_cop = st.number_input("Heat-pump seasonal COP", min_value=0.1, value=3.0)
+            waste_heat_kw = st.number_input("Waste-heat available capacity [kWth]", 0.0, value=0.0)
+            waste_heat_summer_hours = st.number_input("Waste-heat summer availability [h/year]", 0.0, value=0.0)
+            monthly_storage_loss = st.number_input("PTES monthly standing loss [%]", min_value=0.0, max_value=99.0, value=0.0)
+            hourly_initial_soc = st.slider("Initial PTES state of charge at first hour [%]", 0.0, 100.0, 0.0) / 100
+            hourly_hp_max_price = st.number_input("Heat-pump maximum electricity price [€/MWh]", value=80.0)
+            st.caption("For a normal full-year simulation keep initial PTES state of charge at 0%. The heat pump runs only below its selected electricity-price limit.")
         demand_hourly_profile = None
         demand_profile_file = st.file_uploader("Optional hourly heat-demand profile CSV", type=["csv", "txt"], key="demand_profile")
         if demand_profile_file is not None:
@@ -480,8 +490,6 @@ with st.sidebar:
                 st.success(f"Demand profile accepted: {demand_hourly_profile['Demand [MWh]'].sum():,.0f} MWh across {len(demand_hourly_profile):,} hours.")
             except (ValueError, KeyError, pd.errors.ParserError) as exc:
                 st.warning(f"Demand profile could not be read: {exc}. A monthly-distribution fallback will be labelled in the output.")
-        hourly_initial_soc = st.slider("Hourly model: initial PTES state of charge [%]", 0.0, 100.0, 0.0) / 100
-        hourly_hp_max_price = st.number_input("Hourly model: heat-pump maximum electricity price [€/MWh]", value=80.0)
     with st.expander("3 · Connection-pipe design point"):
         st.caption("One hydraulic operating point for DN and pressure-loss screening. This is NOT a charging schedule. Run hourly operation in Step 3 of the main page.")
         operating_mode = st.selectbox("Hydraulic screening mode", ["Charging", "Discharging", "Idle"])
