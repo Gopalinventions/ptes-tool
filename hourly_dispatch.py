@@ -72,8 +72,8 @@ def run_hourly_dispatch(
         direct_hp = min(remaining, hp)
         remaining -= direct_hp
         hp_surplus = hp - direct_hp
-        total_charge = min(max(0.0, waste_surplus + bhkw_surplus + hp_surplus), max(0.0, storage_capacity_mwh - soc))
-        soc += total_charge
+        non_solar_charge = min(max(0.0, waste_surplus + bhkw_surplus + hp_surplus), max(0.0, storage_capacity_mwh - soc))
+        soc += non_solar_charge
         discharge = min(remaining, soc) if row[0].month in ptes_discharge_months else 0.0
         soc -= discharge
         boiler = remaining - discharge
@@ -90,7 +90,7 @@ def run_hourly_dispatch(
             "BHKW 2 electricity [MWh]": bhkw2_electricity, "BHKW electricity [MWh]": bhkw_electricity,
             "BHKW fuel [MWh]": bhkw_electricity * bhkw_fuel_per_mwh_e,
             "Heat pump heat [MWh]": hp, "Heat-pump electricity [MWh]": hp / heat_pump_cop,
-            "PTES charge [MWh]": total_charge, "PTES discharge [MWh]": discharge,
+            "PTES charge [MWh]": solar_to_ptes + non_solar_charge, "PTES discharge [MWh]": discharge,
             "PTES loss [MWh]": loss, "State of charge [MWh]": soc,
             "Boiler heat [MWh]": boiler, "Price [€/MWh]": price,
             "BHKW electricity revenue [€]": bhkw_electricity * price,

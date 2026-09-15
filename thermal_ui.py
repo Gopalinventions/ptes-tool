@@ -24,7 +24,7 @@ def read_profile(frame):
     return list(powers.itertuples(index=False,name=None)),[t.isoformat() for t in times]
 
 
-def render_thermal(g, hydraulic_power, hydraulic_dt):
+def render_thermal(g, hydraulic_power, hydraulic_dt, linked_hourly=None):
     st.subheader('Step 3 · PTES thermal stratification and animated output')
     st.caption('Uses the Step 2 geometry automatically. No second volume or depth entry. After a run, the output shows an animated 2D temperature section and 3D cutaway with the calculated layer temperatures.')
     preview_path = Path(__file__).with_name('ptes_stratification_example.html')
@@ -44,9 +44,26 @@ def render_thermal(g, hydraulic_power, hydraulic_dt):
             initial_top=st.number_input('Initial top temperature [°C]',5.,95.,40.,key='th_initial_top')
             flow=st.number_input('Maximum circulating water flow [m³/h]',.1,value=round(hydraulic_power/(1.163*hydraulic_dt),2),key='th_flow')
         st.caption('Initial temperature varies linearly between the bottom and surface. Flow is initially suggested from the hydraulic design point, then remains your explicit simulation input. Actual flow changes with temperatures and requested power.')
-        mode=st.radio('Hourly schedule source',['Demonstration only','Upload hourly CSV'],horizontal=True,key='th_mode')
+        schedule_options = ['Demonstration only', 'Upload hourly CSV']
+        if linked_hourly is not None and not linked_hourly.empty:
+            schedule_options.insert(0, 'Use linked Step 0b hourly dispatch')
+        mode=st.radio('Hourly schedule source', schedule_options, horizontal=True,key='th_mode')
         times=None; profile=None; label='Demonstration schedule — not measured generation or network demand'
-        if mode=='Demonstration only':
+        if mode == 'Use linked Step 0b hourly dispatch':
+            required_linked = {'Timestamp', 'PTES charge [MWh]', 'PTES discharge [MWh]'}
+            if not required_linked.issubset(linked_hourly.columns):
+                st.error('The linked hourly dispatch does not contain the PTES charge/discharge columns needed for thermal layers.')
+            else:
+                linked = linked_hourly[['Timestamp', 'PTES charge [MWh]', 'PTES discharge [MWh]']].copy()
+                linked['Timestamp'] = pd.to_datetime(linked['Timestamp'], utc=True, errors='coerce')
+                linked = linked.dropna().sort_values('Timestamp')
+                profile = list(zip(linked['PTES charge [MWh]'].clip(lower=0).mul(1000),
+                                   linked['PTES discharge [MWh]'].clip(lower=0).mul(1000)))
+                times = [stamp.isoformat() for stamp in linked['Timestamp']]
+                label = ('Linked Step 0b dispatch: PTES charge and discharge from the active solar, BHKW and demand calculation. '
+                         'Thermal-layer result remains preliminary until calibrated.')
+                st.info('The active Step 0b hourly charge/discharge values will drive this layer model. Run the thermal simulation, then move the hour slider in the output to inspect the changing temperature layers.')
+        elif mode=='Demonstration only':
             a,b,c=st.columns(3)
             with a:
                 charge_days=st.number_input('Charge days',0,366,30,key='th_cd')

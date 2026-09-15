@@ -1034,7 +1034,7 @@ st.download_button("Download linked 2D/3D design HTML", design_document,
                    "ptes_linked_design.html", "text/html")
 st.info("Preliminary design only: the 2D plan envelopes and 3D pit do not establish final embankment, access-road, drainage or slope-stability design. Confirm these with survey and geotechnical inputs.")
 
-render_thermal(design_model, power, delta_t)
+render_thermal(design_model, power, delta_t, linked_hourly=hourly_result)
 
 if analysis_requested:
     try:
