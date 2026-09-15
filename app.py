@@ -13,6 +13,8 @@ from folium.plugins import Draw
 from shapely.affinity import rotate, translate
 from shapely.geometry import LineString, Point, box
 from streamlit_folium import st_folium
+from openpyxl.chart import BarChart, LineChart, Reference
+from openpyxl.styles import Alignment, Font, PatternFill
 
 from calculations import (assess_main_pipe, darcy_weisbach_pressure_loss,
                           engineering_suitability_score,
@@ -215,6 +217,89 @@ def excel_workbook(candidate_results, data_register, seasonal_results=None, mont
     return output.getvalue()
 
 
+def project_excel_workbook(inputs, energy_monthly, hourly_result, geometry, candidate_results,
+                           data_register, seasonal_results=None, monthly_weather=None):
+    """Create a readable multi-tab PTES planning workbook from the active tool results."""
+    def safe(frame):
+        copy = frame.copy()
+        for column in copy.columns:
+            if isinstance(copy[column].dtype, pd.DatetimeTZDtype):
+                copy[column] = copy[column].dt.tz_convert("UTC").dt.tz_localize(None)
+        return copy
+
+    def write_table(writer, sheet_name, title, explanation, frame):
+        sheet = writer.book.create_sheet(sheet_name)
+        sheet["A1"] = title
+        sheet["A2"] = explanation
+        safe(frame).to_excel(writer, sheet_name=sheet_name, index=False, startrow=3)
+        sheet.freeze_panes = "A5"
+        sheet.sheet_view.showGridLines = False
+        sheet.row_dimensions[2].height = 35
+        for cell in sheet[1]:
+            cell.font = Font(bold=True, size=15, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="17365D")
+        sheet.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(1, len(frame.columns)))
+        sheet["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+        for cell in sheet[4]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="1F4E78")
+            cell.alignment = Alignment(wrap_text=True, vertical="center")
+        sheet.auto_filter.ref = f"A4:{sheet.cell(row=4 + len(frame), column=max(1, len(frame.columns))).coordinate}"
+        for column in sheet.columns:
+            letter = column[0].column_letter
+            width = min(34, max(12, max(len(str(cell.value or "")) for cell in column) + 2))
+            sheet.column_dimensions[letter].width = width
+        return sheet
+
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        writer.book.remove(writer.book.active)
+        overview = pd.DataFrame([
+            {"Step": "1. Inputs", "Purpose": "Active PTES, solar, BHKW and operating-month assumptions."},
+            {"Step": "2. Monthly planning", "Purpose": "Summer price-selected BHKW charging plan and PTES monthly balance."},
+            {"Step": "3. Hourly dispatch", "Purpose": "Solar-to-PTES, demand-led winter BHKW, PTES discharge and boiler balance."},
+            {"Step": "4. Geometry", "Purpose": "Preliminary dimensions and civil quantities for the selected PTES."},
+            {"Step": "5. GIS screening", "Purpose": "Candidate, network and constraint screening results."},
+            {"Step": "6. Weather", "Purpose": "Uploaded or derived weather-demand summaries, when available."},
+        ])
+        write_table(writer, "Read me", "PTES planning workbook", "This workbook records the active tool settings and results. It is a planning and screening export, not a final hydraulic, geotechnical or detailed-design calculation.", overview)
+        write_table(writer, "Inputs", "Active inputs", "Values used when this workbook was downloaded. Change values in the Streamlit tool and download a new workbook to compare cases.", inputs)
+        monthly_sheet = write_table(writer, "Monthly balance", "Step 2 — monthly PTES planning", "Solar is allocated to PTES first. BHKW values in this tab are the summer, price-selected PTES-charging plan only; winter BHKW operation is shown in Hourly dispatch.", energy_monthly)
+        if not energy_monthly.empty:
+            chart = BarChart()
+            chart.title = "Monthly PTES charge and discharge"
+            chart.y_axis.title = "MWh"
+            chart.x_axis.title = "Month"
+            names = list(energy_monthly.columns)
+            selected = [names.index(name) + 1 for name in ["PTES charge [MWh]", "PTES discharge [MWh]"] if name in names]
+            if selected:
+                for column in selected:
+                    chart.add_data(Reference(monthly_sheet, min_col=column, min_row=4, max_row=4 + len(energy_monthly)), titles_from_data=True)
+                chart.set_categories(Reference(monthly_sheet, min_col=1, min_row=5, max_row=4 + len(energy_monthly)))
+                monthly_sheet.add_chart(chart, "A20")
+        if hourly_result is not None and not hourly_result.empty:
+            hourly_summary = hourly_result.set_index("Timestamp").resample("ME").sum(numeric_only=True).reset_index()
+            hourly_sheet = write_table(writer, "Hourly summary", "Step 3 — monthly summary of hourly dispatch", "This is the operational result. Summer BHKW-to-PTES hours use the price threshold. Winter BHKW direct-network supply follows heat demand and does not use price.", hourly_summary)
+            chart = LineChart()
+            chart.title = "PTES end-of-month state of charge"
+            chart.y_axis.title = "MWh"
+            names = list(hourly_summary.columns)
+            if "State of charge [MWh]" in names:
+                chart.add_data(Reference(hourly_sheet, min_col=names.index("State of charge [MWh]") + 1, min_row=4, max_row=4 + len(hourly_summary)), titles_from_data=True)
+                chart.set_categories(Reference(hourly_sheet, min_col=1, min_row=5, max_row=4 + len(hourly_summary)))
+                hourly_sheet.add_chart(chart, "A20")
+            write_table(writer, "Hourly detail", "Step 3 — hourly dispatch detail", "Each row is one modelled hour. Use this tab for checking BHKW 1, BHKW 2, solar charging, PTES state of charge, discharge and boiler heat.", hourly_result)
+        geometry_frame = pd.DataFrame([geometry])
+        write_table(writer, "Geometry", "Step 4 — PTES geometry", "Preliminary geometry and quantities. Confirm slopes, liner, cover, groundwater, drainage and civil works with specialist design inputs.", geometry_frame)
+        write_table(writer, "GIS screening", "Step 5 — candidate and GIS screening", "Candidate rankings and distances are screening outputs. Missing or approximate GIS layers require verification with authority and survey data.", candidate_results)
+        write_table(writer, "GIS register", "Step 5 — GIS data register", "Data availability and source-layer register used in the screening.", data_register)
+        if seasonal_results is not None and not seasonal_results.empty:
+            write_table(writer, "Weather seasonal", "Step 6 — seasonal weather result", "Seasonal weather-derived heat-demand summary.", seasonal_results)
+        if monthly_weather is not None and not monthly_weather.empty:
+            write_table(writer, "Weather monthly", "Step 6 — monthly weather result", "Monthly weather-derived heat-demand summary.", monthly_weather)
+    return output.getvalue()
+
+
 def add_layer(fmap, layer, name, definitions, style, highlight):
     fields = [f for f in definitions if f in layer.columns]
     popup = GeoJsonPopup(fields, [definitions[f] for f in fields], localize=True) if fields else None
@@ -380,7 +465,7 @@ with st.sidebar:
         st.caption("This factor is used only for static sizing/capacity. The thermal simulation calculates boundary losses separately and does not multiply by this factor.")
         reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
     with st.expander("2c · Interlinked energy-system planning", expanded=True):
-        st.caption("Reusable preliminary monthly planning model. Solar thermal is assigned to PTES charging first; it is not supplied directly to the network in this operating concept.")
+        st.caption("Monthly screen: solar charges PTES first and BHKW values show only the summer price-selected PTES-charging plan. Use Step 0b for the separate demand-led winter BHKW network operation.")
         solar_thermal_kw = st.number_input("Solar thermal nominal capacity [kWth]", 0.0, value=3300.0)
         solar_specific_yield = st.number_input(
             "Solar net specific yield [kWhth/kWth/year]", 0.0, value=1030.0,
@@ -455,6 +540,7 @@ with st.sidebar:
         bhkw_mode = st.radio("BHKW operating-hours method", ["Manual planning hours", "2025 day-ahead price threshold"], horizontal=True)
         day_ahead_summary = None
         day_ahead_hourly = None
+        price_threshold = 100.0
         if bhkw_mode == "Manual planning hours":
             bhkw_summer_hours = st.number_input("BHKW selected summer operating hours [h/year]", 0.0, value=0.0)
         else:
@@ -627,7 +713,7 @@ try:
         solar_monthly_mwh=solar_monthly_profile,
         bhkw_electrical_kw=bhkw_electrical_kw,
         bhkw_thermal_kw=bhkw_thermal_kw, bhkw_summer_hours=bhkw_summer_hours,
-        bhkw_operating_months=bhkw_active_months,
+        bhkw_operating_months=bhkw_charge_months,
         heat_pump_thermal_kw=heat_pump_thermal_kw,
         heat_pump_summer_hours=heat_pump_summer_hours, heat_pump_cop=heat_pump_cop,
         waste_heat_kw=waste_heat_kw, waste_heat_summer_hours=waste_heat_summer_hours,
@@ -672,6 +758,7 @@ with st.expander("Open linked charging, discharging and source balance", expande
 
 st.subheader("Step 0b · Hourly dispatch — uploaded profiles")
 st.caption("Solar and demand are aligned to the uploaded day-ahead hourly timestamps. Solar thermal charges PTES first and is curtailed only when PTES is full; it does not directly supply the network in this operating concept.")
+hourly_result = None
 if day_ahead_hourly is None:
     st.info("For hourly BHKW dispatch, select ‘2025 day-ahead price threshold’ in Section 2c and upload the day-ahead price CSV.")
 else:
@@ -1209,9 +1296,25 @@ if analysis_requested:
     st.download_button("Download interactive HTML map", standalone_html, "ptes_candidate_comparison_map.html", "text/html")
     st.download_button("Download comparison CSV", ranking.to_csv(index=False).encode("utf-8"), "ptes_candidate_comparison.csv", "text/csv")
     st.download_button("Download GIS data register", register.to_csv(index=False).encode("utf-8"), "ptes_data_register.csv", "text/csv")
-    st.download_button("Download complete engineering Excel workbook",
-                       excel_workbook(ranking, register, weather_seasonal, weather_monthly),
-                       "ptes_engineering_results.xlsx",
+    active_inputs = pd.DataFrame([
+        {"Input": "PTES water volume [m³]", "Active value": storage["volume_m3"]},
+        {"Input": "Hot reference temperature [°C]", "Active value": tmax},
+        {"Input": "Cold reference temperature [°C]", "Active value": tmin},
+        {"Input": "Solar thermal capacity [kWth]", "Active value": solar_thermal_kw},
+        {"Input": "Solar net specific yield [kWhth/kWth/year]", "Active value": solar_specific_yield},
+        {"Input": "BHKW 1 electrical / thermal [kW]", "Active value": f"{bhkw1_electrical_kw} / {bhkw1_thermal_kw}"},
+        {"Input": "BHKW 2 electrical / thermal [kW]", "Active value": f"{bhkw2_electrical_kw} / {bhkw2_thermal_kw}"},
+        {"Input": "Summer BHKW price threshold [€/MWh]", "Active value": price_threshold},
+        {"Input": "BHKW-to-PTES charging months", "Active value": ", ".join(bhkw_charge_labels)},
+        {"Input": "BHKW direct-network months", "Active value": ", ".join(bhkw_direct_labels)},
+        {"Input": "PTES discharge months", "Active value": ", ".join(ptes_discharge_labels)},
+        {"Input": "PTES cycle view", "Active value": storage_cycle_view},
+        {"Input": "Initial PTES state of charge [%]", "Active value": hourly_initial_soc * 100},
+    ])
+    st.download_button("Download complete PTES project Excel workbook",
+                       project_excel_workbook(active_inputs, energy_frame, hourly_result, design_model,
+                                              ranking, register, weather_seasonal, weather_monthly),
+                       "ptes_complete_project_workbook.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 st.divider()

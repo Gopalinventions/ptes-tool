@@ -95,8 +95,13 @@ def simulate_monthly_balance(x: EnergySystemInputs) -> dict:
     demand = [x.annual_demand_mwh * share for share in DEFAULT_DEMAND_SHARES]
     solar = (list(x.solar_monthly_mwh) if x.solar_monthly_mwh is not None
              else [x.solar_net_annual_mwh * share for share in DEFAULT_SOLAR_SHARES])
-    bhkw_electricity = _summer_distribution(x.bhkw_electrical_kw * x.bhkw_summer_hours / 1000)
     bhkw = _month_distribution(x.bhkw_thermal_kw * x.bhkw_summer_hours / 1000, x.bhkw_operating_months)
+    # Electricity is co-produced whenever BHKW thermal heat is shown.  It is
+    # not limited to the summer price-selected months in this display.
+    bhkw_electricity = [
+        thermal * x.bhkw_electrical_kw / x.bhkw_thermal_kw if x.bhkw_thermal_kw else 0.0
+        for thermal in bhkw
+    ]
     heat_pump = _summer_distribution(x.heat_pump_thermal_kw * x.heat_pump_summer_hours / 1000)
     waste_heat = _summer_distribution(x.waste_heat_kw * x.waste_heat_summer_hours / 1000)
     monthly_loss = x.monthly_storage_loss_percent / 100
