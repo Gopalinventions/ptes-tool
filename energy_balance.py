@@ -84,10 +84,11 @@ def validate_inputs(x: EnergySystemInputs) -> None:
 def simulate_monthly_balance(x: EnergySystemInputs) -> dict:
     """Calculate source-first supply, PTES charge/discharge and remaining heat.
 
-    Solar, BHKW, heat-pump and waste heat first meet monthly demand. Surplus
-    charges PTES; the PTES discharges for deficits before an external boiler
-    covers the balance. Sources other than solar are intentionally summer-only
-    planning inputs so the model does not invent winter operation.
+    Solar is dedicated to PTES charging first and is not treated as direct
+    network supply. BHKW, heat-pump and waste heat meet monthly demand; their
+    surplus may charge the remaining PTES space. PTES discharges for deficits
+    before an external boiler covers the balance. This is a preliminary monthly
+    planning balance, not an operating simulation.
     """
     validate_inputs(x)
     capacity_mwh = x.storage_volume_m3 * 1.163 * (x.hot_c - x.cold_c) / 1000 * x.usable_capacity_factor
@@ -105,13 +106,16 @@ def simulate_monthly_balance(x: EnergySystemInputs) -> dict:
         soc_before_loss = soc
         standing_loss = soc_before_loss * monthly_loss
         soc = max(0.0, soc_before_loss - standing_loss)
-        source_total = solar[index] + bhkw[index] + heat_pump[index] + waste_heat[index]
-        direct_supply = min(demand[index], source_total)
-        surplus = max(0.0, source_total - demand[index])
-        accepted_charge = min(surplus, max(0.0, capacity_mwh - soc))
-        curtailed = surplus - accepted_charge
-        soc += accepted_charge
-        deficit = max(0.0, demand[index] - source_total)
+        solar_to_ptes = min(solar[index], max(0.0, capacity_mwh - soc))
+        solar_curtailed = solar[index] - solar_to_ptes
+        soc += solar_to_ptes
+        non_solar_sources = bhkw[index] + heat_pump[index] + waste_heat[index]
+        direct_supply = min(demand[index], non_solar_sources)
+        surplus = max(0.0, non_solar_sources - demand[index])
+        source_charge = min(surplus, max(0.0, capacity_mwh - soc))
+        curtailed = solar_curtailed + surplus - source_charge
+        soc += source_charge
+        deficit = max(0.0, demand[index] - non_solar_sources)
         discharge = min(deficit, soc)
         soc -= discharge
         boiler = deficit - discharge
@@ -119,7 +123,7 @@ def simulate_monthly_balance(x: EnergySystemInputs) -> dict:
             "Month": month, "Demand [MWh]": demand[index], "Solar [MWh]": solar[index],
             "BHKW electricity [MWh]": bhkw_electricity[index], "BHKW heat [MWh]": bhkw[index], "Heat pump heat [MWh]": heat_pump[index],
             "Waste heat [MWh]": waste_heat[index], "Direct source supply [MWh]": direct_supply,
-            "PTES charge [MWh]": accepted_charge, "PTES discharge [MWh]": discharge,
+            "Solar to PTES [MWh]": solar_to_ptes, "PTES charge [MWh]": solar_to_ptes + source_charge, "PTES discharge [MWh]": discharge,
             "PTES loss [MWh]": standing_loss, "PTES state of charge [MWh]": soc,
             "Curtailment [MWh]": curtailed, "Remaining boiler heat [MWh]": boiler,
             "Heat-pump electricity [MWh]": heat_pump[index] / x.heat_pump_cop,

@@ -380,7 +380,7 @@ with st.sidebar:
         st.caption("This factor is used only for static sizing/capacity. The thermal simulation calculates boundary losses separately and does not multiply by this factor.")
         reference_demand = st.number_input("Reference demand [MWh/year]", 1.0, value=10000.0)
     with st.expander("2c · Interlinked energy-system planning", expanded=True):
-        st.caption("Reusable preliminary monthly planning model. Change source capacities, operating hours or PTES volume to update the shared charging/discharging balance.")
+        st.caption("Reusable preliminary monthly planning model. Solar thermal is assigned to PTES charging first; it is not supplied directly to the network in this operating concept.")
         solar_thermal_kw = st.number_input("Solar thermal nominal capacity [kWth]", 0.0, value=3300.0)
         solar_specific_yield = st.number_input(
             "Solar net specific yield [kWhth/kWth/year]", 0.0, value=1030.0,
@@ -432,10 +432,16 @@ with st.sidebar:
         st.caption(f"Combined BHKW capacity used in the simple dispatch: {bhkw_electrical_kw:,.0f} kWe and {bhkw_thermal_kw:,.0f} kWth.")
         bhkw_fuel_per_mwh_e = st.number_input("BHKW fuel input per electricity output [MWhfuel/MWhe]", 0.1, value=2.4728)
         bhkw_month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        bhkw_direct_labels = st.multiselect("BHKW direct-network supply months", bhkw_month_labels,
-                                            default=bhkw_month_labels)
-        bhkw_charge_labels = st.multiselect("BHKW-to-PTES charging months", bhkw_month_labels,
-                                            default=["May", "Jun", "Jul", "Aug", "Sep"])
+        bhkw_direct_labels = st.multiselect(
+            "BHKW direct-network supply months (heat-demand led; no price rule)",
+            bhkw_month_labels,
+            default=["Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr"],
+        )
+        bhkw_charge_labels = st.multiselect(
+            "BHKW-to-PTES charging months (summer price rule applies)",
+            bhkw_month_labels,
+            default=["May", "Jun", "Jul", "Aug", "Sep"],
+        )
         ptes_discharge_labels = st.multiselect("PTES discharge months", bhkw_month_labels,
                                                default=["Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr"])
         storage_cycle_view = st.selectbox(
@@ -465,7 +471,9 @@ with st.sidebar:
                     price_value_col = st.selectbox("Day-ahead price column", price_columns, index=price_value_default, key="price_value_col")
                     price_time = pd.to_datetime(price_frame[price_time_col], errors="coerce")
                     prices = numeric_series(price_frame, price_value_col)
-                    selected = (price_time.dt.month.isin(bhkw_active_months) & (prices >= price_threshold)).fillna(False)
+                    # Day-ahead prices decide only optional BHKW-to-PTES summer operation.
+                    # Direct network heat is dispatched later from the heat demand, not the price.
+                    selected = (price_time.dt.month.isin(bhkw_charge_months) & (prices >= price_threshold)).fillna(False)
                     bhkw_summer_hours = float(selected.sum())
                     day_ahead_summary = {
                         "hours": bhkw_summer_hours,
@@ -473,7 +481,7 @@ with st.sidebar:
                         "revenue_eur": float((prices[selected] * bhkw_electrical_kw / 1000).sum()),
                     }
                     day_ahead_hourly = hourly_energy_profile(price_time, prices, "Price [€/MWh]")
-                    st.success(f"Selected BHKW hours: {bhkw_summer_hours:,.0f} h; mean price: {day_ahead_summary['mean_price']:,.1f} €/MWh.")
+                    st.success(f"Selected summer BHKW charging hours: {bhkw_summer_hours:,.0f} h; mean price: {day_ahead_summary['mean_price']:,.1f} €/MWh.")
                 except (ValueError, KeyError, pd.errors.ParserError) as exc:
                     st.warning(f"Day-ahead price file could not be read: {exc}. Upload the CSV again or use manual hours.")
             else:
@@ -649,7 +657,7 @@ with st.expander("Open linked charging, discharging and source balance", expande
     energy_frame["BHKW 1 heat [MWh]"] = energy_frame["BHKW heat [MWh]"] * bhkw1_share
     energy_frame["BHKW 2 heat [MWh]"] = energy_frame["BHKW heat [MWh]"] - energy_frame["BHKW 1 heat [MWh]"]
     chart_frame = energy_frame.set_index("Month")[[
-        "Solar [MWh]", "BHKW 1 heat [MWh]", "BHKW 2 heat [MWh]", "Heat pump heat [MWh]", "Waste heat [MWh]",
+        "Solar [MWh]", "Solar to PTES [MWh]", "BHKW 1 heat [MWh]", "BHKW 2 heat [MWh]", "Heat pump heat [MWh]", "Waste heat [MWh]",
         "PTES charge [MWh]", "PTES discharge [MWh]", "PTES state of charge [MWh]",
     ]]
     chart_frame.index = pd.date_range("2025-01-01", periods=12, freq="MS")
@@ -663,7 +671,7 @@ with st.expander("Open linked charging, discharging and source balance", expande
     st.info(energy_balance["model_status"])
 
 st.subheader("Step 0b · Hourly dispatch — uploaded profiles")
-st.caption("Solar and demand are aligned to the uploaded day-ahead hourly timestamps. Source operation is heat-acceptance limited: it cannot charge PTES beyond its selected volume.")
+st.caption("Solar and demand are aligned to the uploaded day-ahead hourly timestamps. Solar thermal charges PTES first and is curtailed only when PTES is full; it does not directly supply the network in this operating concept.")
 if day_ahead_hourly is None:
     st.info("For hourly BHKW dispatch, select ‘2025 day-ahead price threshold’ in Section 2c and upload the day-ahead price CSV.")
 else:
@@ -708,7 +716,7 @@ else:
         h4.metric("Boiler heat remaining", f"{hourly_metrics['Boiler heat [MWh]']:,.0f} MWh")
         st.caption(f"{solar_status} {demand_status} {cycle_status}")
         hourly_indexed = hourly_result.set_index("Timestamp")
-        monthly_energy = hourly_indexed[["Solar [MWh]", "BHKW 1 heat [MWh]", "BHKW 2 heat [MWh]", "BHKW direct network [MWh]", "BHKW to PTES [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]"]].resample("ME").sum()
+        monthly_energy = hourly_indexed[["Solar [MWh]", "Solar to PTES [MWh]", "BHKW 1 heat [MWh]", "BHKW 2 heat [MWh]", "BHKW direct network [MWh]", "BHKW to PTES [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]"]].resample("ME").sum()
         monthly_soc = hourly_indexed[["State of charge [MWh]"]].resample("ME").last()
         chart_left, chart_right = st.columns(2)
         with chart_left:

@@ -17,10 +17,11 @@ def run_hourly_dispatch(
 ) -> pd.DataFrame:
     """Run a heat-acceptance-limited merit order on aligned hourly profiles.
 
-    Source order is solar, waste heat, price-qualified BHKW, then
-    price-qualified heat pump.  PTES receives surplus and discharges before
-    boiler heat.  Partial-load operation is permitted; minimum loads, starts,
-    ramps and network hydraulics are intentionally not claimed here.
+    Solar is dedicated to PTES charging first: it does not directly supply the
+    network in this operating concept. Waste heat, BHKW and heat pump then meet
+    demand and may charge remaining PTES headroom. PTES discharges before boiler
+    heat. Partial-load operation is permitted; minimum loads, starts, ramps and
+    network hydraulics are intentionally not claimed here.
     """
     required = {"Timestamp", "Demand [MWh]", "Solar [MWh]", "Price [€/MWh]"}
     missing = required.difference(frame.columns)
@@ -41,14 +42,18 @@ def run_hourly_dispatch(
         loss = soc * hourly_loss
         soc = max(0.0, soc - loss)
         headroom = max(0.0, storage_capacity_mwh - soc)
-        direct_solar = min(demand, solar)
-        remaining = demand - direct_solar
-        solar_surplus = solar - direct_solar
+        # Solar thermal is connected as a dedicated seasonal-storage charger.
+        # If PTES is full, solar is curtailed; it is not diverted to the network.
+        solar_to_ptes = min(solar, headroom)
+        solar_curtailed = solar - solar_to_ptes
+        soc += solar_to_ptes
+        headroom = max(0.0, storage_capacity_mwh - soc)
+        remaining = demand
         waste = min(waste_heat_kw / 1000, remaining + headroom)
         direct_waste = min(remaining, waste)
         remaining -= direct_waste
         waste_surplus = waste - direct_waste
-        headroom -= solar_surplus + waste_surplus
+        headroom -= waste_surplus
         direct_allowed = row[0].month in bhkw_direct_months
         charge_allowed = row[0].month in bhkw_charge_months
         # Direct-network months are heat-led.  In charging-only months the
@@ -67,7 +72,7 @@ def run_hourly_dispatch(
         direct_hp = min(remaining, hp)
         remaining -= direct_hp
         hp_surplus = hp - direct_hp
-        total_charge = min(max(0.0, solar_surplus + waste_surplus + bhkw_surplus + hp_surplus), max(0.0, storage_capacity_mwh - soc))
+        total_charge = min(max(0.0, waste_surplus + bhkw_surplus + hp_surplus), max(0.0, storage_capacity_mwh - soc))
         soc += total_charge
         discharge = min(remaining, soc) if row[0].month in ptes_discharge_months else 0.0
         soc -= discharge
@@ -77,6 +82,7 @@ def run_hourly_dispatch(
         bhkw_electricity = bhkw1_electricity + bhkw2_electricity
         rows.append({
             "Timestamp": row[0], "Demand [MWh]": demand, "Solar [MWh]": solar,
+            "Solar to PTES [MWh]": solar_to_ptes, "Solar curtailment [MWh]": solar_curtailed,
             "Waste heat [MWh]": waste, "BHKW 1 heat [MWh]": bhkw1,
             "BHKW 2 heat [MWh]": bhkw2, "BHKW heat [MWh]": bhkw,
             "BHKW direct network [MWh]": direct_bhkw, "BHKW to PTES [MWh]": bhkw_surplus,
