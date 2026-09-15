@@ -34,6 +34,7 @@ class EnergySystemInputs:
     bhkw_electrical_kw: float
     bhkw_thermal_kw: float
     bhkw_summer_hours: float
+    bhkw_operating_months: tuple[int, ...]
     heat_pump_thermal_kw: float
     heat_pump_summer_hours: float
     heat_pump_cop: float
@@ -46,6 +47,15 @@ def _summer_distribution(total_mwh: float) -> list[float]:
     """Distribute a summer-only source by May–September calendar days."""
     days = (31, 30, 31, 31, 30)
     return [0.0] * 4 + [total_mwh * d / sum(days) for d in days] + [0.0] * 3
+
+
+def _month_distribution(total_mwh: float, months: tuple[int, ...]) -> list[float]:
+    days = (31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31)
+    selected = tuple(month for month in months if 1 <= month <= 12)
+    if not selected:
+        return [0.0] * 12
+    selected_days = sum(days[month - 1] for month in selected)
+    return [total_mwh * days[index] / selected_days if index + 1 in selected else 0.0 for index in range(12)]
 
 
 def validate_inputs(x: EnergySystemInputs) -> None:
@@ -62,6 +72,8 @@ def validate_inputs(x: EnergySystemInputs) -> None:
         raise ValueError("Usable capacity factor must be between 0 and 1.")
     if x.heat_pump_cop <= 0:
         raise ValueError("Heat-pump COP must be greater than zero.")
+    if not all(1 <= month <= 12 for month in x.bhkw_operating_months):
+        raise ValueError("BHKW operating months must be between 1 and 12.")
     if x.solar_monthly_mwh is not None:
         if len(x.solar_monthly_mwh) != 12 or any(value < 0 for value in x.solar_monthly_mwh):
             raise ValueError("Uploaded solar profile must contain 12 non-negative monthly energy values.")
@@ -83,7 +95,7 @@ def simulate_monthly_balance(x: EnergySystemInputs) -> dict:
     solar = (list(x.solar_monthly_mwh) if x.solar_monthly_mwh is not None
              else [x.solar_net_annual_mwh * share for share in DEFAULT_SOLAR_SHARES])
     bhkw_electricity = _summer_distribution(x.bhkw_electrical_kw * x.bhkw_summer_hours / 1000)
-    bhkw = _summer_distribution(x.bhkw_thermal_kw * x.bhkw_summer_hours / 1000)
+    bhkw = _month_distribution(x.bhkw_thermal_kw * x.bhkw_summer_hours / 1000, x.bhkw_operating_months)
     heat_pump = _summer_distribution(x.heat_pump_thermal_kw * x.heat_pump_summer_hours / 1000)
     waste_heat = _summer_distribution(x.waste_heat_kw * x.waste_heat_summer_hours / 1000)
     monthly_loss = x.monthly_storage_loss_percent / 100

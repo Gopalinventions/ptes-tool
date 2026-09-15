@@ -422,9 +422,13 @@ with st.sidebar:
         st.caption(f"Combined BHKW capacity used in the simple dispatch: {bhkw_electrical_kw:,.0f} kWe and {bhkw_thermal_kw:,.0f} kWth.")
         bhkw_fuel_per_mwh_e = st.number_input("BHKW fuel input per electricity output [MWhfuel/MWhe]", 0.1, value=2.4728)
         bhkw_month_labels = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        bhkw_active_labels = st.multiselect("BHKW price-controlled operating months", bhkw_month_labels,
+        bhkw_direct_labels = st.multiselect("BHKW direct-network supply months", bhkw_month_labels,
+                                            default=bhkw_month_labels)
+        bhkw_charge_labels = st.multiselect("BHKW-to-PTES charging months", bhkw_month_labels,
                                             default=["May", "Jun", "Jul", "Aug", "Sep"])
-        bhkw_active_months = tuple(bhkw_month_labels.index(month) + 1 for month in bhkw_active_labels)
+        bhkw_direct_months = tuple(bhkw_month_labels.index(month) + 1 for month in bhkw_direct_labels)
+        bhkw_charge_months = tuple(bhkw_month_labels.index(month) + 1 for month in bhkw_charge_labels)
+        bhkw_active_months = tuple(sorted(set(bhkw_direct_months) | set(bhkw_charge_months)))
         bhkw_mode = st.radio("BHKW operating-hours method", ["Manual planning hours", "2025 day-ahead price threshold"], horizontal=True)
         day_ahead_summary = None
         day_ahead_hourly = None
@@ -598,6 +602,7 @@ try:
         solar_monthly_mwh=solar_monthly_profile,
         bhkw_electrical_kw=bhkw_electrical_kw,
         bhkw_thermal_kw=bhkw_thermal_kw, bhkw_summer_hours=bhkw_summer_hours,
+        bhkw_operating_months=bhkw_active_months,
         heat_pump_thermal_kw=heat_pump_thermal_kw,
         heat_pump_summer_hours=heat_pump_summer_hours, heat_pump_cop=heat_pump_cop,
         waste_heat_kw=waste_heat_kw, waste_heat_summer_hours=waste_heat_summer_hours,
@@ -623,8 +628,11 @@ if day_ahead_summary is not None:
     st.caption("Gross market revenue only. Gas, O&M, starts, demand acceptance and PTES limits are assessed separately.")
 with st.expander("Open linked charging, discharging and source balance", expanded=True):
     energy_frame = pd.DataFrame(energy_balance["rows"])
+    bhkw1_share = 0.0 if bhkw_thermal_kw == 0 else bhkw1_thermal_kw / bhkw_thermal_kw
+    energy_frame["BHKW 1 heat [MWh]"] = energy_frame["BHKW heat [MWh]"] * bhkw1_share
+    energy_frame["BHKW 2 heat [MWh]"] = energy_frame["BHKW heat [MWh]"] - energy_frame["BHKW 1 heat [MWh]"]
     chart_frame = energy_frame.set_index("Month")[[
-        "Solar [MWh]", "BHKW heat [MWh]", "Heat pump heat [MWh]", "Waste heat [MWh]",
+        "Solar [MWh]", "BHKW 1 heat [MWh]", "BHKW 2 heat [MWh]", "Heat pump heat [MWh]", "Waste heat [MWh]",
         "PTES charge [MWh]", "PTES discharge [MWh]", "PTES state of charge [MWh]",
     ]]
     chart_frame.index = pd.date_range("2025-01-01", periods=12, freq="MS")
@@ -661,9 +669,10 @@ else:
         hourly_result = run_hourly_dispatch(
             hourly_input[["Timestamp", "Demand [MWh]", "Solar [MWh]", "Price [€/MWh]"]],
             storage_capacity_mwh=energy_balance["capacity_mwh"], initial_soc_fraction=hourly_initial_soc,
-            bhkw_thermal_kw=bhkw_thermal_kw, bhkw_electrical_kw=bhkw_electrical_kw,
+            bhkw1_thermal_kw=bhkw1_thermal_kw, bhkw1_electrical_kw=bhkw1_electrical_kw,
+            bhkw2_thermal_kw=bhkw2_thermal_kw, bhkw2_electrical_kw=bhkw2_electrical_kw,
             bhkw_price_threshold=price_threshold, bhkw_fuel_per_mwh_e=bhkw_fuel_per_mwh_e,
-            bhkw_active_months=bhkw_active_months,
+            bhkw_direct_months=bhkw_direct_months, bhkw_charge_months=bhkw_charge_months,
             heat_pump_thermal_kw=heat_pump_thermal_kw, heat_pump_cop=heat_pump_cop,
             heat_pump_max_price=hourly_hp_max_price, waste_heat_kw=waste_heat_kw,
             monthly_loss_percent=monthly_storage_loss,
@@ -676,7 +685,7 @@ else:
         h4.metric("Boiler heat remaining", f"{hourly_metrics['Boiler heat [MWh]']:,.0f} MWh")
         st.caption(f"{solar_status} {demand_status}")
         hourly_indexed = hourly_result.set_index("Timestamp")
-        monthly_energy = hourly_indexed[["Solar [MWh]", "BHKW heat [MWh]", "Heat pump heat [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]"]].resample("ME").sum()
+        monthly_energy = hourly_indexed[["Solar [MWh]", "BHKW 1 heat [MWh]", "BHKW 2 heat [MWh]", "BHKW direct network [MWh]", "BHKW to PTES [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]"]].resample("ME").sum()
         monthly_soc = hourly_indexed[["State of charge [MWh]"]].resample("ME").last()
         chart_left, chart_right = st.columns(2)
         with chart_left:
