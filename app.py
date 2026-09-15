@@ -114,6 +114,16 @@ def default_hourly_demand(index: pd.DatetimeIndex, annual_mwh: float) -> pd.Seri
                       for stamp in index], index=index)
 
 
+def seasonal_storage_cycle(frame: pd.DataFrame, start_month: int) -> pd.DataFrame:
+    """Show one representative charge/discharge cycle from start month to next year."""
+    result = frame.copy()
+    result["Timestamp"] = pd.to_datetime(result["Timestamp"])
+    result.loc[result["Timestamp"].dt.month < start_month, "Timestamp"] = (
+        result.loc[result["Timestamp"].dt.month < start_month, "Timestamp"] + pd.DateOffset(years=1)
+    )
+    return result.sort_values("Timestamp").reset_index(drop=True)
+
+
 def json_safe(layer):
     layer = layer.copy()
     for col in layer.columns:
@@ -426,8 +436,15 @@ with st.sidebar:
                                             default=bhkw_month_labels)
         bhkw_charge_labels = st.multiselect("BHKW-to-PTES charging months", bhkw_month_labels,
                                             default=["May", "Jun", "Jul", "Aug", "Sep"])
+        ptes_discharge_labels = st.multiselect("PTES discharge months", bhkw_month_labels,
+                                               default=["Oct", "Nov", "Dec", "Jan", "Feb", "Mar", "Apr"])
+        storage_cycle_view = st.selectbox(
+            "PTES cycle view", ["May–April seasonal storage year", "January–December calendar year"],
+            help="May–April is recommended: solar/BHKW summer charging happens before winter discharge through the following April.",
+        )
         bhkw_direct_months = tuple(bhkw_month_labels.index(month) + 1 for month in bhkw_direct_labels)
         bhkw_charge_months = tuple(bhkw_month_labels.index(month) + 1 for month in bhkw_charge_labels)
+        ptes_discharge_months = tuple(bhkw_month_labels.index(month) + 1 for month in ptes_discharge_labels)
         bhkw_active_months = tuple(sorted(set(bhkw_direct_months) | set(bhkw_charge_months)))
         bhkw_mode = st.radio("BHKW operating-hours method", ["Manual planning hours", "2025 day-ahead price threshold"], horizontal=True)
         day_ahead_summary = None
@@ -665,6 +682,11 @@ else:
         hourly_input = hourly_input.merge(demand_hourly_profile, on="Timestamp", how="left")
         hourly_input["Demand [MWh]"] = hourly_input["Demand [MWh]"].fillna(0.0)
         demand_status = "Uploaded hourly demand profile used."
+    if storage_cycle_view == "May–April seasonal storage year":
+        hourly_input = seasonal_storage_cycle(hourly_input, start_month=5)
+        cycle_status = "Seasonal cycle shown as May 2025–April 2026; January–April source profiles reuse the representative uploaded-year data."
+    else:
+        cycle_status = "Calendar-year cycle shown from January–December."
     try:
         hourly_result = run_hourly_dispatch(
             hourly_input[["Timestamp", "Demand [MWh]", "Solar [MWh]", "Price [€/MWh]"]],
@@ -673,6 +695,7 @@ else:
             bhkw2_thermal_kw=bhkw2_thermal_kw, bhkw2_electrical_kw=bhkw2_electrical_kw,
             bhkw_price_threshold=price_threshold, bhkw_fuel_per_mwh_e=bhkw_fuel_per_mwh_e,
             bhkw_direct_months=bhkw_direct_months, bhkw_charge_months=bhkw_charge_months,
+            ptes_discharge_months=ptes_discharge_months,
             heat_pump_thermal_kw=heat_pump_thermal_kw, heat_pump_cop=heat_pump_cop,
             heat_pump_max_price=hourly_hp_max_price, waste_heat_kw=waste_heat_kw,
             monthly_loss_percent=monthly_storage_loss,
@@ -683,7 +706,7 @@ else:
         h2.metric("PTES discharged", f"{hourly_metrics['PTES discharge [MWh]']:,.0f} MWh")
         h3.metric("BHKW electricity revenue", f"€{hourly_metrics['BHKW electricity revenue [€]']:,.0f}")
         h4.metric("Boiler heat remaining", f"{hourly_metrics['Boiler heat [MWh]']:,.0f} MWh")
-        st.caption(f"{solar_status} {demand_status}")
+        st.caption(f"{solar_status} {demand_status} {cycle_status}")
         hourly_indexed = hourly_result.set_index("Timestamp")
         monthly_energy = hourly_indexed[["Solar [MWh]", "BHKW 1 heat [MWh]", "BHKW 2 heat [MWh]", "BHKW direct network [MWh]", "BHKW to PTES [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]"]].resample("ME").sum()
         monthly_soc = hourly_indexed[["State of charge [MWh]"]].resample("ME").last()

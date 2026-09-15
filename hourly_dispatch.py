@@ -11,6 +11,7 @@ def run_hourly_dispatch(
     bhkw2_thermal_kw: float, bhkw2_electrical_kw: float,
     bhkw_price_threshold: float, bhkw_fuel_per_mwh_e: float,
     bhkw_direct_months: tuple[int, ...], bhkw_charge_months: tuple[int, ...],
+    ptes_discharge_months: tuple[int, ...],
     heat_pump_thermal_kw: float, heat_pump_cop: float,
     heat_pump_max_price: float, waste_heat_kw: float, monthly_loss_percent: float,
 ) -> pd.DataFrame:
@@ -50,7 +51,9 @@ def run_hourly_dispatch(
         headroom -= solar_surplus + waste_surplus
         direct_allowed = row[0].month in bhkw_direct_months
         charge_allowed = row[0].month in bhkw_charge_months
-        bhkw_eligible = (direct_allowed or charge_allowed) and price >= bhkw_price_threshold
+        # Direct-network months are heat-led.  In charging-only months the
+        # BHKW needs the selected electricity-price condition.
+        bhkw_eligible = direct_allowed or (charge_allowed and price >= bhkw_price_threshold)
         bhkw_acceptance = (remaining if direct_allowed else 0.0) + (max(0.0, headroom) if charge_allowed else 0.0)
         bhkw1 = min(bhkw1_thermal_kw / 1000 if bhkw_eligible else 0.0, bhkw_acceptance)
         bhkw2 = min(bhkw2_thermal_kw / 1000 if bhkw_eligible else 0.0, max(0.0, bhkw_acceptance - bhkw1))
@@ -66,7 +69,7 @@ def run_hourly_dispatch(
         hp_surplus = hp - direct_hp
         total_charge = min(max(0.0, solar_surplus + waste_surplus + bhkw_surplus + hp_surplus), max(0.0, storage_capacity_mwh - soc))
         soc += total_charge
-        discharge = min(remaining, soc)
+        discharge = min(remaining, soc) if row[0].month in ptes_discharge_months else 0.0
         soc -= discharge
         boiler = remaining - discharge
         bhkw1_electricity = bhkw1 * (bhkw1_electrical_kw / bhkw1_thermal_kw) if bhkw1_thermal_kw else 0.0
