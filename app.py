@@ -794,13 +794,16 @@ with st.expander("Open linked charging, discharging and source balance", expande
     bhkw1_share = 0.0 if bhkw_thermal_kw == 0 else bhkw1_thermal_kw / bhkw_thermal_kw
     energy_frame["BHKW 1 heat [MWh]"] = energy_frame["BHKW heat [MWh]"] * bhkw1_share
     energy_frame["BHKW 2 heat [MWh]"] = energy_frame["BHKW heat [MWh]"] - energy_frame["BHKW 1 heat [MWh]"]
-    chart_frame = energy_frame.set_index("Month")[[
-        "Solar [MWh]", "Solar to PTES [MWh]", "BHKW 1 heat [MWh]", "BHKW 2 heat [MWh]", "Heat pump heat [MWh]", "Waste heat [MWh]",
-        "PTES charge [MWh]", "PTES discharge [MWh]", "PTES state of charge [MWh]",
-    ]]
+    chart_frame = energy_frame.set_index("Month")
     chart_frame.index = pd.date_range("2025-01-01", periods=12, freq="MS")
     chart_frame.index.name = "Month"
-    st.line_chart(chart_frame, use_container_width=True)
+    monthly_left, monthly_right = st.columns(2)
+    with monthly_left:
+        st.caption("Monthly sources and PTES charge/discharge")
+        st.bar_chart(chart_frame[["Solar to PTES [MWh]", "BHKW 1 heat [MWh]", "BHKW 2 heat [MWh]", "PTES charge [MWh]", "PTES discharge [MWh]", "Remaining boiler heat [MWh]"]], use_container_width=True)
+    with monthly_right:
+        st.caption("Monthly PTES state of charge")
+        st.line_chart(chart_frame[["PTES state of charge [MWh]"]], use_container_width=True)
     st.dataframe(energy_frame.round(1), hide_index=True, use_container_width=True)
     st.download_button(
         "Download energy-balance CSV", energy_frame.to_csv(index=False).encode("utf-8"),
@@ -855,6 +858,27 @@ else:
         h4.metric("Boiler heat remaining", f"{hourly_metrics['Boiler heat [MWh]']:,.0f} MWh")
         st.caption(f"{solar_status} {demand_status} {cycle_status}")
         hourly_indexed = hourly_result.set_index("Timestamp")
+        # Support an older hourly_dispatch.py during GitHub/Streamlit updates.
+        # The fallback keeps the app running and is replaced by exact BHKW 1/2
+        # flows as soon as the matching updated dispatch file is deployed.
+        legacy_dispatch = False
+        if "Solar to PTES [MWh]" not in hourly_indexed:
+            hourly_indexed["Solar to PTES [MWh]"] = 0.0
+            legacy_dispatch = True
+        total_bhkw = hourly_indexed.get("BHKW heat [MWh]", pd.Series(0.0, index=hourly_indexed.index))
+        bhkw1_share_hourly = (hourly_indexed.get("BHKW 1 heat [MWh]", pd.Series(0.0, index=hourly_indexed.index))
+                              .div(total_bhkw.where(total_bhkw > 0, 1.0))).clip(0.0, 1.0)
+        direct_bhkw = hourly_indexed.get("BHKW direct network [MWh]", pd.Series(0.0, index=hourly_indexed.index))
+        charge_bhkw = hourly_indexed.get("BHKW to PTES [MWh]", pd.Series(0.0, index=hourly_indexed.index))
+        for label, total_flow in [("direct network", direct_bhkw), ("to PTES", charge_bhkw)]:
+            one = f"BHKW 1 {label} [MWh]"
+            two = f"BHKW 2 {label} [MWh]"
+            if one not in hourly_indexed or two not in hourly_indexed:
+                hourly_indexed[one] = total_flow * bhkw1_share_hourly
+                hourly_indexed[two] = total_flow - hourly_indexed[one]
+                legacy_dispatch = True
+        if legacy_dispatch:
+            st.info("Compatibility view: the deployed dispatch file is older than the interface. BHKW 1/2 split is estimated from each unit's hourly heat share until you upload the matching hourly_dispatch.py file.")
         monthly_energy = hourly_indexed[[
             "Solar [MWh]", "Solar to PTES [MWh]",
             "BHKW 1 direct network [MWh]", "BHKW 2 direct network [MWh]",
