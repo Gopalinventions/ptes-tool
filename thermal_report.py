@@ -12,5 +12,4 @@ def thermal_html(result, label):
     payload=dict(geometry=result['geometry'],layers=result['layers'],label=label,
                  history=[{k:v for k,v in row.items() if k in ('hour','top_c','bottom_c','energy_above_return_mwh','temperatures_c')} for row in result['history']])
     return Path(__file__).with_name('designer_assets').joinpath('thermal.html').read_text(encoding='utf-8').replace(
-        'const __THERMAL_DATA__=null;',
-        'const __THERMAL_DATA__='+json.dumps(payload,allow_nan=False).replace('<','\\u003c')+';')
+        '__THERMAL_DATA__', json.dumps(payload, allow_nan=False).replace('<', '\\u003c'))

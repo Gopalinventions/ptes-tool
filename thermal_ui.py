@@ -57,11 +57,19 @@ def render_thermal(g, hydraulic_power, hydraulic_dt, linked_hourly=None):
                 linked = linked_hourly[['Timestamp', 'PTES charge [MWh]', 'PTES discharge [MWh]']].copy()
                 linked['Timestamp'] = pd.to_datetime(linked['Timestamp'], utc=True, errors='coerce')
                 linked = linked.dropna().sort_values('Timestamp')
-                profile = list(zip(linked['PTES charge [MWh]'].clip(lower=0).mul(1000),
-                                   linked['PTES discharge [MWh]'].clip(lower=0).mul(1000)))
+                charge_kw = linked['PTES charge [MWh]'].clip(lower=0).mul(1000)
+                discharge_kw = linked['PTES discharge [MWh]'].clip(lower=0).mul(1000)
+                simultaneous = int(((charge_kw > 0) & (discharge_kw > 0)).sum())
+                # The multi-layer model has one PTES boundary direction per hour.
+                # Cancel opposing internal flows upstream as a direct-network bypass,
+                # then send only the net storage movement to the thermal model.
+                net_storage_kw = charge_kw - discharge_kw
+                profile = list(zip(net_storage_kw.clip(lower=0), (-net_storage_kw).clip(lower=0)))
                 times = [stamp.isoformat() for stamp in linked['Timestamp']]
                 label = ('Linked Step 0b dispatch: PTES charge and discharge from the active solar, BHKW and demand calculation. '
-                         'Thermal-layer result remains preliminary until calibrated.')
+                         'Opposing hourly charge/discharge flows are netted before the storage boundary. Thermal-layer result remains preliminary until calibrated.')
+                if simultaneous:
+                    st.info(f'{simultaneous:,} hours contain both a charging and a discharge request in the system dispatch. For thermal layers these are netted at the PTES boundary, so each simulated hour has one storage direction only.')
                 st.info('The active Step 0b hourly charge/discharge values will drive this layer model. Run the thermal simulation, then move the hour slider in the output to inspect the changing temperature layers.')
         elif mode=='Demonstration only':
             a,b,c=st.columns(3)
