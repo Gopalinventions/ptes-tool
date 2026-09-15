@@ -98,10 +98,11 @@ def render_thermal(g, hydraulic_power, hydraulic_dt, linked_hourly=None):
             soil=st.number_input('Constant ground boundary temperature [°C]',5.,60.,10.,key='th_soil')
             conductivity=st.number_input('Effective vertical conductivity [W/mK]',0.,value=.6,key='th_k')
         with c:
-            layers=st.selectbox('Number of water layers',[10,20,40,80],index=1,key='th_layers')
+            layers=st.selectbox('Number of water layers',[10,20,40,80],index=0,key='th_layers',
+                                help='Choose 10 layers for the clearest labelled storage-section diagram. Higher layer counts improve numerical resolution but cannot display every label clearly.')
             step=st.selectbox('Maximum internal time step [minutes]',[1.,2.5,5.],index=2,key='th_step')
             cap=st.number_input('Storage-interface power limit, each direction [kW]',0.,value=float(hydraulic_power),key='th_cap')
-        st.caption('Effective U-values are NOT derived from material labels, insulation thickness or nearby groundwater. The cover term represents an effective water-to-outside boundary; freeboard air and dry upper walls are not separately resolved. Flow/time-step limits are numerical/operational inputs, not proof of pipe capacity.')
+        st.caption('Choose 10 water layers for the presentation view: the PTES section then displays L1–L10 temperatures inside the storage and a changing temperature-by-depth curve. Effective U-values are NOT derived from material labels, insulation thickness or nearby groundwater.')
         cfg=Settings(layers,initial_bottom,initial_top,source,returned,delivery,flow,cap,cap,cover_u,side_u,bottom_u,air,soil,conductivity,step)
         refine=st.checkbox('Check sensitivity using twice as many layers',value=True,disabled=layers==80,key='th_refine') and layers<80
         st.caption('First-order layer transport can spread the thermocline numerically. A small energy-balance residual does not establish layer-resolution accuracy. Compare layers before using predicted discharge.')
