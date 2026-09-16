@@ -47,8 +47,6 @@ def design_geometry(target, depth, slope, freeboard, ratio, layout=None, **mater
              insulationMass=cover*p['coverThickness']/1000*p['coverDensity'])
     footprint = dict(top_length_m=L, top_width_m=B, top_area_m2=L*B,
                      bottom_length_m=l, bottom_width_m=b, bottom_area_m2=l*b, depth_m=H)
-    # Layout items are deliberately separate from geometry/material validation: they
-    # are preliminary operational symbols rather than civil-design quantities.
     p["layout"] = layout or {}
     return p, g, footprint
 
@@ -57,10 +55,17 @@ def designer_html(inputs, model):
     """Offline HTML; geometry is locked to app inputs, appearance remains interactive."""
     assets = Path(__file__).with_name("designer_assets")
     html = (assets/"index.html").read_text(encoding="utf-8")
-    payload = json.dumps(dict(inputs=inputs, model=model), allow_nan=False).replace("<", "\\u003c")
-    html = html.replace('<script src="geometry.js"></script>',
-                        f'<script>window.PTES_EMBEDDED={payload};</script>')
+    payload = json.dumps(dict(inputs=inputs, model=model), allow_nan=False).replace("<", "\u003c")
+    geometry_tag = '<script src="geometry.js"></script>'
+    if geometry_tag not in html:
+        raise RuntimeError("PTES HTML template is missing its embedded-data marker.")
+    html = html.replace(geometry_tag, f'<script>window.PTES_EMBEDDED={payload};</script>', 1)
     for name in ("cad.js", "designer.js"):
         script = (assets/name).read_text(encoding="utf-8")
-        html = html.replace(f'<script src="{name}"></script>', f'<script>{script}</script>')
+        marker = f'<script src="{name}"></script>'
+        if marker not in html or not script.strip():
+            raise RuntimeError(f"PTES HTML export could not include {name}.")
+        html = html.replace(marker, f'<script>{script}</script>', 1)
+    if "function update()" not in html or "const CAD=" not in html:
+        raise RuntimeError("PTES HTML export is incomplete; no blank design file was created.")
     return html
