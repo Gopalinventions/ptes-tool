@@ -67,8 +67,11 @@ def designer_html(inputs, model):
         marker = f'<script src="{name}"></script>'
         if marker not in html or not script.strip():
             raise RuntimeError(f"PTES HTML export could not include {name}.")
-        html = html.replace(marker, f'<script>{script}</script>', 1)
-    # designer.js defines function update(){...}; accept the actual JavaScript declaration.
+        # Split once at the known asset marker instead of using a template
+        # replacement. This is robust when the embedded JavaScript contains
+        # special characters while Streamlit Cloud builds the download file.
+        before, after = html.split(marker, 1)
+        html = before + "<script>" + script + "</script>" + after
     if "function update(" not in html or "const CAD=" not in html:
         raise RuntimeError("PTES HTML export is incomplete; no blank design file was created.")
     return html
