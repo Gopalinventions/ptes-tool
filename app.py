@@ -702,6 +702,16 @@ with st.sidebar:
             "The former 15 m + 20 m screening buffers were intentionally conservative. Increase these "
             "values where geotechnics, haul roads, cranes, drainage or temporary soil stockpiles require it."
         )
+        st.markdown("**Preliminary operational layout for the drawing**")
+        st.caption("These values draw a concept layout only. They are not pump, diffuser, drainage or civil-work specifications.")
+        pump_side = st.selectbox("Pump chamber side", ["East", "West", "North", "South"], index=0)
+        pump_chamber_length = st.number_input("Pump chamber length [m]", 1.0, value=12.0)
+        pump_chamber_width = st.number_input("Pump chamber width [m]", 1.0, value=8.0)
+        drainage_well_count = st.number_input("Preliminary drainage / monitoring points", 0, 8, value=2, step=1)
+        diffuser_velocity_limit = st.number_input(
+            "Diffuser outlet-velocity screening limit [m/s]", 0.005, 0.10, value=0.03, step=0.005,
+            help="Low velocity is used as a screening principle to limit mixing. The final diffuser geometry requires hydraulic design.",
+        )
         parcel_radius = st.number_input("Nearby GIS investigation radius [m]", 100.0, value=1000.0,
                                         help="Only nearby parcel and context features are drawn on the map.")
     with st.expander("7 · Suitability percentage"):
@@ -751,11 +761,24 @@ try:
                        energy_per_cycle_mwh=capacity["useful_capacity_mwh"],
                        annual_shifted_mwh=capacity["useful_capacity_mwh"]*cycles,
                        cycles_per_year=cycles, delta_t_k=capacity["delta_t_k"])
+    design_flow = required_flow(power, delta_t)
+    layout = {
+        "pumpSide": pump_side,
+        "pumpLength": pump_chamber_length,
+        "pumpWidth": pump_chamber_width,
+        "drainageWells": int(drainage_well_count),
+        "designFlowM3h": design_flow["volume_flow_m3_h"],
+        "diffuserVelocityMps": diffuser_velocity_limit,
+        "diffuserAreaM2": design_flow["volume_flow_m3_s"] / diffuser_velocity_limit,
+        "minimumDN": minimum_branch_dn,
+        "maximumDN": maximum_branch_dn,
+    }
     design_inputs, design_model, geometry = design_geometry(
         storage["volume_m3"], depth, side_slope, freeboard, aspect_ratio,
         linerThickness=liner_thickness, linerDensity=liner_density,
         allowance=liner_allowance, coverThickness=cover_thickness, coverDensity=cover_density,
-        permanentPerimeter=embankment_width, temporaryWorking=construction_clearance)
+        permanentPerimeter=embankment_width, temporaryWorking=construction_clearance,
+        layout=layout)
     design_document = designer_html(design_inputs, design_model)
     energy_inputs = EnergySystemInputs(
         annual_demand_mwh=annual_demand,
@@ -1137,12 +1160,12 @@ if not candidate_table.empty:
 analysis_requested = st.button("Analyse nPro candidates", type="primary", disabled=candidate_table.empty)
 
 st.subheader("Step 2 · PTES geometry — dimensioned 2D and 3D design")
-st.caption("The same storage volume, depth, slope, freeboard, permanent perimeter and temporary working envelope are used in the drawing and in the GIS boundary calculation.")
+st.caption("The same storage volume, depth, slope, permanent perimeter and temporary working envelope are used in the drawing and GIS boundary calculation. The pump, diffuser and drainage symbols are preliminary concept-layout items.")
 with st.expander("Open dimensioned 2D section, plan, 3D model and quantities", expanded=True):
     components.html(design_document, height=950, scrolling=True)
 st.download_button("Download linked 2D/3D design HTML", design_document,
                    "ptes_linked_design.html", "text/html")
-st.info("Preliminary design only: the 2D plan envelopes and 3D pit do not establish final embankment, access-road, drainage or slope-stability design. Confirm these with survey and geotechnical inputs.")
+st.info("Preliminary design only: the layout illustrates excavation, embankment/perimeter, construction working area, pump chamber, branch pipes, diffuser zones and drainage points. Confirm final access roads, drainage, hydraulics, levels and slope stability with survey, geotechnical and specialist design inputs.")
 
 render_thermal(design_model, power, delta_t, linked_hourly=hourly_result)
 
