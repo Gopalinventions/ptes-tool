@@ -4,7 +4,9 @@ import geopandas as gpd
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
-from designer_integration import design_geometry, designer_html
+from designer_integration import design_geometry
+from engineering_drawings import (engineering_schedule, isometric_svg, plan_svg,
+                                  section_svg, standalone_html)
 from energy_balance import DEFAULT_DEMAND_SHARES, EnergySystemInputs, simulate_monthly_balance
 from hourly_dispatch import run_hourly_dispatch
 from thermal_ui import render_thermal
@@ -826,7 +828,13 @@ try:
         allowance=liner_allowance, coverThickness=cover_thickness, coverDensity=cover_density,
         permanentPerimeter=embankment_width, temporaryWorking=construction_clearance,
         layout=layout)
-    design_document = designer_html(design_inputs, design_model)
+    # Keep the design drawing native to Streamlit/Python.  The former JavaScript
+    # drawing studio was an optional export and could fail independently of the
+    # PTES calculation; these static SVG sheets always use this exact geometry.
+    plan_drawing = plan_svg(design_inputs, design_model)
+    section_drawing = section_svg(design_inputs, design_model)
+    isometric_drawing = isometric_svg(design_inputs, design_model)
+    design_document = standalone_html(design_inputs, design_model)
     energy_inputs = EnergySystemInputs(
         annual_demand_mwh=annual_demand,
         storage_volume_m3=storage["volume_m3"], hot_c=tmax, cold_c=tmin,
@@ -1206,13 +1214,24 @@ if not candidate_table.empty:
 
 analysis_requested = st.button("Analyse nPro candidates", type="primary", disabled=candidate_table.empty)
 
-st.subheader("Step 2 · PTES geometry — dimensioned 2D and 3D design")
-st.caption("The same storage volume, depth, slope, permanent perimeter and temporary working envelope are used in the drawing and GIS boundary calculation. The pump, diffuser and drainage symbols are preliminary concept-layout items.")
-with st.expander("Open dimensioned 2D section, plan, 3D model and quantities", expanded=False):
-    components.html(design_document, height=950, scrolling=True)
-st.download_button("Download linked 2D/3D design HTML", design_document,
-                   "ptes_linked_design.html", "text/html")
-st.info("Preliminary design only: the layout illustrates excavation, embankment/perimeter, construction working area, pump chamber, branch pipes, diffuser zones and drainage points. Confirm final access roads, drainage, hydraulics, levels and slope stability with survey, geotechnical and specialist design inputs.")
+st.subheader("Step 2 · PTES engineering drawing module")
+st.caption("These native drawings are generated directly from the same storage volume, depth, slope, freeboard, perimeter and working envelope used by the calculation. They do not depend on external JavaScript files.")
+plan_tab, section_tab, model_tab, schedule_tab = st.tabs(["2D plan", "2D sections", "3D concept", "Engineering schedule"])
+with plan_tab:
+    components.html(plan_drawing, height=735, scrolling=True)
+    st.download_button("Download plan drawing SVG", plan_drawing, "ptes_plan.svg", "image/svg+xml", key="plan_svg")
+with section_tab:
+    components.html(section_drawing, height=735, scrolling=True)
+    st.download_button("Download section drawing SVG", section_drawing, "ptes_sections.svg", "image/svg+xml", key="section_svg")
+with model_tab:
+    components.html(isometric_drawing, height=735, scrolling=True)
+    st.download_button("Download 3D concept SVG", isometric_drawing, "ptes_3d_concept.svg", "image/svg+xml", key="iso_svg")
+with schedule_tab:
+    schedule_frame = pd.DataFrame(engineering_schedule(design_inputs, design_model), columns=["Parameter", "Active design value"])
+    st.dataframe(schedule_frame, hide_index=True, use_container_width=True)
+st.download_button("Download complete engineering drawing package (HTML)", design_document,
+                   "ptes_engineering_drawing_package.html", "text/html")
+st.info("Preliminary design only: shown access, membrane, cover, pump chamber, hydraulic openings and drainage are concept symbols. Confirm terrain levels, groundwater, roads, drainage, slope stability, liner system, structural design and final hydraulics with survey, geotechnical and specialist inputs.")
 
 render_thermal(design_model, power, delta_t, linked_hourly=hourly_result)
 
