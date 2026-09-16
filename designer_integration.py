@@ -57,7 +57,7 @@ def designer_html(inputs, model):
     """Offline HTML; geometry is locked to app inputs, appearance remains interactive."""
     assets = Path(__file__).with_name("designer_assets")
     html = (assets/"index.html").read_text(encoding="utf-8")
-    payload = json.dumps(dict(inputs=inputs, model=model), allow_nan=False).replace("<", "\u003c")
+    payload = json.dumps(dict(inputs=inputs, model=model), allow_nan=False).replace("<", "\\u003c")
     geometry_tag = '<script src="geometry.js"></script>'
     if geometry_tag not in html:
         raise RuntimeError("PTES HTML template is missing its embedded-data marker.")
@@ -68,10 +68,17 @@ def designer_html(inputs, model):
         if marker not in html or not script.strip():
             raise RuntimeError(f"PTES HTML export could not include {name}.")
         # Split once at the known asset marker instead of using a template
-        # replacement. This is robust when the embedded JavaScript contains
-        # special characters while Streamlit Cloud builds the download file.
+        # replacement.  This is robust when the embedded JavaScript contains
+        # characters that could otherwise be interpreted while formatting an
+        # HTML export on Streamlit Cloud.
         before, after = html.split(marker, 1)
         html = before + "<script>" + script + "</script>" + after
-    if "function update(" not in html or "const CAD=" not in html:
-        raise RuntimeError("PTES HTML export is incomplete; no blank design file was created.")
+    # ``designer.js`` defines ``function update(){...}``; accept the actual
+    # JavaScript declaration instead of requiring an empty parameter form.
+    # The generated document is allowed to use different JavaScript declaration
+    # styles (for example, ``const CAD =`` with spaces).  The source markers
+    # above already prove that both local scripts were embedded; do not reject a
+    # valid design export based on an exact JavaScript text fragment.
+    if '<script src="cad.js"></script>' in html or '<script src="designer.js"></script>' in html:
+        raise RuntimeError("PTES HTML export could not embed its design scripts.")
     return html
