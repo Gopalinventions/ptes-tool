@@ -352,6 +352,50 @@ def hourly_dispatch_excel_workbook(hourly_result, monthly_energy, monthly_soc, i
     return output.getvalue()
 
 
+@st.cache_data(show_spinner="Calculating the hourly PTES dispatch…")
+def cached_hourly_dispatch(
+    hourly_input: pd.DataFrame, storage_capacity_mwh: float, initial_soc_fraction: float,
+    bhkw1_thermal_kw: float, bhkw1_electrical_kw: float,
+    bhkw2_thermal_kw: float, bhkw2_electrical_kw: float,
+    bhkw_price_threshold: float, bhkw_fuel_per_mwh_e: float,
+    bhkw_direct_months: tuple[int, ...], bhkw_charge_months: tuple[int, ...],
+    ptes_discharge_months: tuple[int, ...], heat_pump_thermal_kw: float,
+    heat_pump_cop: float, heat_pump_max_price: float, waste_heat_kw: float,
+    monthly_loss_percent: float,
+) -> pd.DataFrame:
+    """Cache the 8,760-hour calculation until an operational input changes."""
+    return run_hourly_dispatch(
+        hourly_input, storage_capacity_mwh=storage_capacity_mwh,
+        initial_soc_fraction=initial_soc_fraction,
+        bhkw1_thermal_kw=bhkw1_thermal_kw, bhkw1_electrical_kw=bhkw1_electrical_kw,
+        bhkw2_thermal_kw=bhkw2_thermal_kw, bhkw2_electrical_kw=bhkw2_electrical_kw,
+        bhkw_price_threshold=bhkw_price_threshold,
+        bhkw_fuel_per_mwh_e=bhkw_fuel_per_mwh_e,
+        bhkw_direct_months=bhkw_direct_months,
+        bhkw_charge_months=bhkw_charge_months,
+        ptes_discharge_months=ptes_discharge_months,
+        heat_pump_thermal_kw=heat_pump_thermal_kw, heat_pump_cop=heat_pump_cop,
+        heat_pump_max_price=heat_pump_max_price, waste_heat_kw=waste_heat_kw,
+        monthly_loss_percent=monthly_loss_percent,
+    )
+
+
+@st.cache_data(show_spinner="Preparing the hourly Excel workbook…")
+def cached_hourly_dispatch_excel(hourly_result, monthly_energy, monthly_soc, inputs):
+    """Avoid recreating a full 8,760-row workbook on every widget rerun."""
+    return hourly_dispatch_excel_workbook(hourly_result, monthly_energy, monthly_soc, inputs)
+
+
+@st.cache_data(show_spinner="Preparing the complete PTES Excel workbook…")
+def cached_project_excel(inputs, energy_monthly, hourly_result, geometry, candidate_results,
+                         data_register, seasonal_results=None, monthly_weather=None):
+    """Keep the download ready while active results remain unchanged."""
+    return project_excel_workbook(
+        inputs, energy_monthly, hourly_result, geometry, candidate_results,
+        data_register, seasonal_results, monthly_weather,
+    )
+
+
 def add_layer(fmap, layer, name, definitions, style, highlight):
     fields = [f for f in definitions if f in layer.columns]
     popup = GeoJsonPopup(fields, [definitions[f] for f in fields], localize=True) if fields else None
@@ -864,14 +908,14 @@ else:
     else:
         cycle_status = "Calendar-year cycle shown from January–December."
     try:
-        hourly_result = run_hourly_dispatch(
+        hourly_result = cached_hourly_dispatch(
             hourly_input[["Timestamp", "Demand [MWh]", "Solar [MWh]", "Price [€/MWh]"]],
             storage_capacity_mwh=energy_balance["capacity_mwh"], initial_soc_fraction=hourly_initial_soc,
             bhkw1_thermal_kw=bhkw1_thermal_kw, bhkw1_electrical_kw=bhkw1_electrical_kw,
             bhkw2_thermal_kw=bhkw2_thermal_kw, bhkw2_electrical_kw=bhkw2_electrical_kw,
             bhkw_price_threshold=price_threshold, bhkw_fuel_per_mwh_e=bhkw_fuel_per_mwh_e,
-            bhkw_direct_months=bhkw_direct_months, bhkw_charge_months=bhkw_charge_months,
-            ptes_discharge_months=ptes_discharge_months,
+            bhkw_direct_months=tuple(bhkw_direct_months), bhkw_charge_months=tuple(bhkw_charge_months),
+            ptes_discharge_months=tuple(ptes_discharge_months),
             heat_pump_thermal_kw=heat_pump_thermal_kw, heat_pump_cop=heat_pump_cop,
             heat_pump_max_price=hourly_hp_max_price, waste_heat_kw=waste_heat_kw,
             monthly_loss_percent=monthly_storage_loss,
@@ -945,7 +989,7 @@ else:
             {"Input": "Initial PTES state of charge [%]", "Value": hourly_initial_soc * 100},
         ])
         st.download_button("Download hourly dispatch Excel workbook (tables, charts and explanation)",
-                           hourly_dispatch_excel_workbook(hourly_result, monthly_energy, monthly_soc, hourly_export_inputs),
+                           cached_hourly_dispatch_excel(hourly_result, monthly_energy, monthly_soc, hourly_export_inputs),
                            "ptes_hourly_dispatch_explained.xlsx",
                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         st.download_button("Download hourly dispatch CSV", hourly_result.to_csv(index=False).encode("utf-8"),
@@ -1448,8 +1492,8 @@ if analysis_requested:
         {"Input": "Initial PTES state of charge [%]", "Active value": hourly_initial_soc * 100},
     ])
     st.download_button("Download complete PTES project Excel workbook",
-                       project_excel_workbook(active_inputs, energy_frame, hourly_result, design_model,
-                                              ranking, register, weather_seasonal, weather_monthly),
+                       cached_project_excel(active_inputs, energy_frame, hourly_result, design_model,
+                                            ranking, register, weather_seasonal, weather_monthly),
                        "ptes_complete_project_workbook.xlsx",
                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
