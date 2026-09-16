@@ -1216,6 +1216,23 @@ analysis_requested = st.button("Analyse nPro candidates", type="primary", disabl
 
 st.subheader("Step 2 · PTES engineering drawing module")
 st.caption("These native drawings are generated directly from the same storage volume, depth, slope, freeboard, perimeter and working envelope used by the calculation. They do not depend on external JavaScript files.")
+with st.expander("Drawing layers and view options", expanded=False):
+    st.caption("Use these controls to make a clear presentation drawing. They only change drawing visibility - not the engineering calculations.")
+    layer_cols = st.columns(3)
+    with layer_cols[0]:
+        show_liner = st.checkbox("Liner and protective membrane", value=True)
+        show_lid = st.checkbox("Floating lid and ballast pipes", value=True)
+    with layer_cols[1]:
+        show_hydraulics = st.checkbox("Pump, supply, return and diffusers", value=True)
+        show_drainage = st.checkbox("Drainage sumps / wells", value=True)
+    with layer_cols[2]:
+        show_dimensions = st.checkbox("Dimension chains", value=True)
+        st.caption("The 3D view is an engineering axonometric concept, not a terrain model or final construction BIM model.")
+drawing_layers = {"liner": show_liner, "lid": show_lid, "hydraulics": show_hydraulics,
+                  "drainage": show_drainage, "dimensions": show_dimensions}
+plan_drawing = plan_svg(design_inputs, design_model, drawing_layers)
+section_drawing = section_svg(design_inputs, design_model, drawing_layers)
+isometric_drawing = isometric_svg(design_inputs, design_model, drawing_layers)
 plan_tab, section_tab, model_tab, schedule_tab = st.tabs(["2D plan", "2D sections", "3D concept", "Engineering schedule"])
 with plan_tab:
     components.html(plan_drawing, height=735, scrolling=True)
