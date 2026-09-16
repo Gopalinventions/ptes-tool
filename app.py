@@ -15,6 +15,7 @@ from shapely.geometry import LineString, Point, box
 from streamlit_folium import st_folium
 from openpyxl.chart import BarChart, LineChart, Reference
 from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from calculations import (assess_main_pipe, darcy_weisbach_pressure_loss,
                           engineering_suitability_score,
@@ -211,9 +212,9 @@ def excel_workbook(candidate_results, data_register, seasonal_results=None, mont
                 cell.font = cell.font.copy(bold=True, color="FFFFFF")
                 cell.fill = cell.fill.copy(fill_type="solid", fgColor="1F4E78")
                 cell.alignment = cell.alignment.copy(wrap_text=True, vertical="center")
-            for column in sheet.columns:
+            for column_index, column in enumerate(sheet.columns, start=1):
                 width = min(45, max(12, max(len(str(cell.value or "")) for cell in column) + 2))
-                sheet.column_dimensions[column[0].column_letter].width = width
+                sheet.column_dimensions[get_column_letter(column_index)].width = width
     return output.getvalue()
 
 
@@ -245,8 +246,8 @@ def project_excel_workbook(inputs, energy_monthly, hourly_result, geometry, cand
             cell.fill = PatternFill("solid", fgColor="1F4E78")
             cell.alignment = Alignment(wrap_text=True, vertical="center")
         sheet.auto_filter.ref = f"A4:{sheet.cell(row=4 + len(frame), column=max(1, len(frame.columns))).coordinate}"
-        for column in sheet.columns:
-            letter = column[0].column_letter
+        for column_index, column in enumerate(sheet.columns, start=1):
+            letter = get_column_letter(column_index)
             width = min(34, max(12, max(len(str(cell.value or "")) for cell in column) + 2))
             sheet.column_dimensions[letter].width = width
         return sheet
@@ -323,8 +324,8 @@ def hourly_dispatch_excel_workbook(hourly_result, monthly_energy, monthly_soc, i
                 cell.font = Font(bold=True, color="FFFFFF")
                 cell.fill = PatternFill("solid", fgColor="1F4E78")
                 cell.alignment = Alignment(wrap_text=True, vertical="center")
-            for column in sheet.columns:
-                sheet.column_dimensions[column[0].column_letter].width = min(32, max(13, max(len(str(cell.value or "")) for cell in column) + 2))
+            for column_index, column in enumerate(sheet.columns, start=1):
+                sheet.column_dimensions[get_column_letter(column_index)].width = min(32, max(13, max(len(str(cell.value or "")) for cell in column) + 2))
         operations = writer.sheets["Monthly operations"]
         columns = list(monthly_energy.reset_index().columns)
         chart_columns = [name for name in ["Solar to PTES [MWh]", "BHKW 1 to PTES [MWh]", "BHKW 2 to PTES [MWh]", "BHKW 1 direct network [MWh]", "BHKW 2 direct network [MWh]", "PTES discharge [MWh]", "Boiler heat [MWh]"] if name in columns]
